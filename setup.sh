@@ -6,7 +6,7 @@ yum update -y
 
 # Cài đặt các thư viện cần thiết
 yum install -y epel-release
-yum install -y squid python3 python3-pip firewalld
+yum install -y squid python3 python3-pip firewalld httpd-tools
 
 # Kích hoạt và khởi động firewalld
 systemctl enable firewalld
@@ -44,7 +44,7 @@ http_access deny all
 # Bật log
 access_log /var/log/squid/access.log squid
 
-# Cấu hình giới hạn băng thông (delay pools)
+# Cấu hình giới hạn băng thông
 delay_pools 0
 # Các cổng và delay pools sẽ được thêm động bởi proxy.py
 EOF
