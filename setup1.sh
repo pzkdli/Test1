@@ -113,87 +113,11 @@ else
     exit 1
 fi
 
-# Hàm kiểm tra định dạng prefix IPv6
-validate_ipv6_prefix() {
-    local input=$1
-    # Kiểm tra định dạng prefix IPv6 với /64
-    if [[ ! $input =~ ^[0-9a-fA-F:]+/64$ ]]; then
-        echo "Lỗi: Prefix IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f::/64"
-        return 1
-    fi
-    return 0
-}
-
-# Hàm tạo địa chỉ IPv6 ngẫu nhiên từ prefix
-generate_random_ipv6() {
-    local prefix=$1
-    # Lấy 4 phần đầu của prefix (loại bỏ /64)
-    local prefix_base=${prefix%:*/64}
-    # Tạo 4 phần ngẫu nhiên (mỗi phần là hex 4 chữ số)
-    local rand1=$(printf "%04x" $((RANDOM % 65536)))
-    local rand2=$(printf "%04x" $((RANDOM % 65536)))
-    local rand3=$(printf "%04x" $((RANDOM % 65536)))
-    local rand4=$(printf "%04x" $((RANDOM % 65536)))
-    # Kết hợp prefix với 4 phần ngẫu nhiên
-    echo "${prefix_base}:${rand1}:${rand2}:${rand3}:${rand4}"
-}
-
-# Hàm nhập thủ công prefix IPv6
-get_ipv6_prefix() {
-    echo "Vui lòng nhập prefix IPv6 (ví dụ: 2401:2420:0:102f::/64):"
-    local max_attempts=3
-    local attempt=1
-    while [ $attempt -le $max_attempts ]; do
-        read -r ipv6_input
-        if validate_ipv6_prefix "$ipv6_input"; then
-            echo "Prefix IPv6 hợp lệ: $ipv6_input"
-            echo "$ipv6_input"
-            return 0
-        fi
-        echo "Lỗi: Prefix IPv6 không hợp lệ! Vui lòng nhập lại ($attempt/$max_attempts)."
-        attempt=$((attempt + 1))
-        if [ $attempt -gt $max_attempts ]; then
-            echo "Lỗi: Đã vượt quá số lần thử. Vui lòng kiểm tra lại prefix IPv6."
-            return 1
-        fi
-    done
-}
-
-# Nhập thủ công prefix IPv6 (ở cuối script)
-IPV6_RANGE=$(get_ipv6_prefix)
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể xác định prefix IPv6!"
-    exit 1
-fi
-
-# Tạo địa chỉ IPv6 ngẫu nhiên
-IPV6_ADDRESS=$(generate_random_ipv6 "$IPV6_RANGE")
-if [ -z "$IPV6_ADDRESS" ]; then
-    echo "Lỗi: Không thể tạo địa chỉ IPv6 ngẫu nhiên!"
-    exit 1
-fi
-
-# Gán địa chỉ IPv6 cho giao diện mạng
-echo "Gán địa chỉ IPv6 $IPV6_ADDRESS..."
-interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
-if [ -z "$interface" ]; then
-    echo "Lỗi: Không tìm thấy giao diện mạng!"
-    exit 1
-fi
-ip -6 addr flush dev "$interface"
-ip -6 addr add "$IPV6_ADDRESS/64" dev "$interface"
-if ip -6 addr show dev "$interface" | grep -q "${IPV6_ADDRESS%/*}"; then
-    echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào $interface."
-else
-    echo "Lỗi: Không thể gán địa chỉ IPv6! Vui lòng kiểm tra prefix IPv6 với nhà cung cấp VPS."
-    exit 1
-fi
-
-# Tạo file ipv6_range.json với prefix IPv6
+# Tạo file ipv6_range.json với giá trị mặc định (sẽ được proxy.vn cập nhật)
 echo "Tạo file /root/ipv6_range.json..."
 cat > /root/ipv6_range.json << EOF
-{"ipv6_range": "$IPV6_RANGE"}
+{"ipv6_range": ""}
 EOF
 chmod 600 /root/ipv6_range.json
 
-echo "Cài đặt hoàn tất! Bạn có thể chạy 'python3 proxy.py' và sử dụng lệnh /new 2 1 trong Telegram."
+echo "Cài đặt hoàn tất! Vui lòng cấu hình prefix IPv6 trong proxy.vn và chạy 'python3 proxy.vn'."
