@@ -7,6 +7,7 @@ from telegram.ext import Updater, CommandHandler, Filters
 import threading
 import time
 import os
+import socket
 
 # Cấu hình
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
@@ -26,7 +27,16 @@ def generate_password():
 # Lấy IPv4 của VPS
 def get_vps_ip():
     try:
-        return subprocess.check_output("curl -s ifconfig.me", shell=True).decode().strip()
+        # Sử dụng lệnh `ip` để lấy địa chỉ IPv4 của giao diện mạng chính
+        result = subprocess.check_output("ip -4 addr show | grep inet | awk '{print $2}' | cut -d'/' -f1 | head -n 1", shell=True).decode().strip()
+        if result:
+            return result
+        # Fallback: Sử dụng socket để lấy IPv4
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
     except:
         return "127.0.0.1"  # Fallback nếu không lấy được IP
 
@@ -114,7 +124,7 @@ def remove_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -257,7 +267,7 @@ def list_used(update, context):
     proxies = load_proxies()
     used_proxies = [p for p in proxies if p["first_connect"] is not None]
     if not used_proxies:
-        update.message.reply_text("Không có proxy nào đang sử dụng!")
+        update.message.reply_text("Không có proxy nào đang sử sử dụng!")
         return
 
     page = 1
