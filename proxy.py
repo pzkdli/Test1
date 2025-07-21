@@ -169,14 +169,22 @@ def is_squid_running():
 
 # Thêm cổng và delay pool vào Squid
 def add_port_and_delay_pool(ipv6, port):
+    # Kiểm tra và khởi động Squid nếu chưa chạy
     if not is_squid_running():
-        print("Squid is not running. Please start Squid service.")
-        return False, "Squid is not running"
+        print("Squid is not running. Attempting to start Squid service...")
+        result = subprocess.run("systemctl start squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            error = result.stderr.decode().strip()
+            print(f"DEBUG: Failed to start Squid: {error}")
+            return False, f"Không thể khởi động Squid: {error}"
+        time.sleep(5)  # Đợi 5 giây để Squid khởi động
+        if not is_squid_running():
+            return False, "Squid vẫn không chạy sau khi thử khởi động"
 
     # Kiểm tra IPv6 có được gán không
     result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if ipv6 not in result.stdout.decode():
-        return False, f"IPv6 {ipv6} not assigned on system"
+        return False, f"IPv6 {ipv6} không được gán trên hệ thống"
 
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
@@ -241,9 +249,12 @@ def add_port_and_delay_pool(ipv6, port):
 # Xóa cổng và delay pool khỏi Squid
 def remove_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
-        print("Squid is not running. Please start Squid service.")
-        return False
-
+        print("Squid is not running. Attempting to start Squid service...")
+        result = subprocess.run("systemctl start squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            print(f"DEBUG: Failed to start Squid: {result.stderr.decode()}")
+            return False
+    
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
@@ -305,7 +316,7 @@ def check_expired_periodically():
     while True:
         update_first_connect()
         delete_expired()
-        time.sleep(600)  # 24 giờ
+        time.sleep(86400)  # 24 giờ
 
 # Kiểm tra quyền admin
 def restrict_to_admin(func):
@@ -361,7 +372,7 @@ def check_proxy(update, context):
             print(f"DEBUG: curl exception for {url}: {str(e)}")
 
     update.message.reply_text("\n".join(results))
-
+    
 # Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
 @restrict_to_admin
 def new_proxy(update, context):
