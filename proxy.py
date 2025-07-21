@@ -14,6 +14,7 @@ import ipaddress
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
 ADMIN_ID = 7550813603
 SQUID_LOG = "/var/log/squid/access.log"
+SQUID_CACHE_LOG = "/var/log/squid/cache.log"
 JSON_PATH = "/root/proxies.json"
 IPV6_RANGE_PATH = "/root/ipv6_range.json"
 SQUID_CONF = "/etc/squid/squid.conf"
@@ -198,26 +199,34 @@ def add_port_and_delay_pool(ipv6, port):
     # Kiểm tra cú pháp file cấu hình
     result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"DEBUG: Error in Squid configuration: {result.stderr.decode()}")
-        return False
+        error = result.stderr.decode().strip()
+        print(f"DEBUG: Error in Squid configuration: {error}")
+        return False, f"Cú pháp cấu hình Squid lỗi: {error}"
     
     # Tải lại cấu hình Squid
     result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"DEBUG: Error reconfiguring Squid: {result.stderr.decode()}")
-        return False
+        error = result.stderr.decode().strip()
+        print(f"DEBUG: Error reconfiguring Squid: {error}")
+        return False, f"Lỗi khi reload Squid: {error}"
     
     # Kiểm tra cổng có được mở không
-    time.sleep(5)  # Tăng thời gian đợi để Squid reload
+    time.sleep(10)  # Đợi 10 giây để Squid reload
     result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Port {port} is not open!")
-        # Kiểm tra log Squid để debug
-        log_result = subprocess.run(f"tail -n 20 /var/log/squid/squid.log", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f"DEBUG: Squid log: {log_result.stdout.decode()}")
-        return False
+        # Kiểm tra log Squid
+        log_output = ""
+        for log_file in [SQUID_CACHE_LOG, SQUID_LOG, "/var/log/squid/squid.log"]:
+            try:
+                result = subprocess.run(f"tail -n 20 {log_file}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                log_output += f"\nLog {log_file}:\n{result.stdout.decode().strip()}"
+            except:
+                log_output += f"\nLog {log_file}: Không tìm thấy"
+        print(f"DEBUG: Squid logs: {log_output}")
+        return False, f"Cổng {port} không mở. Log Squid: {log_output}"
     print(f"DEBUG: Port {port} is open")
-    return True
+    return True, "Success"
 
 # Xóa cổng và delay pool khỏi Squid
 def remove_port_and_delay_pool(ipv6, port):
@@ -286,8 +295,8 @@ def check_expired_periodically():
     while True:
         update_first_connect()
         delete_expired()
-        time.sleep(86400)  # 24 giờ
-
+        time.sleep(800)  # 24 giờ
+    
 # Kiểm tra quyền admin
 def restrict_to_admin(func):
     def wrapper(update, context):
@@ -340,7 +349,7 @@ def check_proxy(update, context):
         except Exception as e:
             results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: {str(e)}")
             print(f"DEBUG: curl exception for {url}: {str(e)}")
-            
+
     update.message.reply_text("\n".join(results))
 
 # Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
@@ -406,8 +415,9 @@ def new_proxy(update, context):
         result = subprocess.run(f"htpasswd -b /etc/squid/passwd {username} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         print(f"DEBUG: htpasswd result for {username}: {result.returncode}, stderr: {result.stderr.decode()}")
         # Thêm cổng và delay pool
-        if not add_port_and_delay_pool(ipv6, port):
-            update.message.reply_text(f"Không thể thêm cổng {port} vào Squid. Vui lòng kiểm tra dịch vụ Squid và IPv6!")
+        success, error_msg = add_port_and_delay_pool(ipv6, port)
+        if not success:
+            update.message.reply_text(f"Không thể thêm cổng {port} vào Squid: {error_msg}")
             return
         print(f"DEBUG: Added proxy {ipv4}:{port} with IPv6 {ipv6} and user {username}")
 
