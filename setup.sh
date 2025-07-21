@@ -34,42 +34,8 @@ get_ipv6_prefix() {
     return 0
 }
 
-# Hàm kiểm tra IPv6 có được kích hoạt không
-check_ipv6_enabled() {
-    if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
-        echo "Lỗi: IPv6 bị vô hiệu hóa trên hệ thống!"
-        echo "Đang kích hoạt IPv6..."
-        sysctl -w net.ipv6.conf.all.disable_ipv6=0
-        echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
-        if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
-            echo "Lỗi: Không thể kích hoạt IPv6! Vui lòng kiểm tra cấu hình hệ thống."
-            exit 1
-        fi
-    fi
-    echo "IPv6 đã được kích hoạt."
-}
-
-# Hàm tự động phát hiện hoặc nhập thủ công dải IPv6
+# Hàm nhập thủ công dải IPv6
 get_ipv6_range() {
-    # Tìm giao diện mạng chính (loại trừ lo)
-    interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
-    if [ -z "$interface" ]; then
-        echo "Lỗi: Không tìm thấy giao diện mạng!"
-        return 1
-    fi
-    # Lấy dải IPv6 /64 từ giao diện
-    ipv6_range=$(ip -6 addr show dev "$interface" | grep inet6 | grep '/64' | awk '{print $2}' | head -n 1 | sed 's/\/64$//')
-    if [ -n "$ipv6_range" ]; then
-        # Chuẩn hóa dải IPv6
-        ipv6_range=$(get_ipv6_prefix "$ipv6_range/64")
-        if [ -n "$ipv6_range" ] && validate_ipv6 "$ipv6_range"; then
-            echo "Đã phát hiện dải IPv6: $ipv6_range"
-            echo "$ipv6_range"
-            return 0
-        fi
-    fi
-    # Nếu không tìm thấy, yêu cầu nhập thủ công
-    echo "Không tìm thấy dải IPv6 /64 trên giao diện $interface."
     echo "Vui lòng nhập địa chỉ IPv6 đầy đủ (ví dụ: 2401:2420:0:102f:0000:0000:0000:0001/64):"
     local max_attempts=3
     local attempt=1
@@ -91,9 +57,24 @@ get_ipv6_range() {
 }
 
 # Kiểm tra IPv6 có được kích hoạt không
+check_ipv6_enabled() {
+    if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
+        echo "Lỗi: IPv6 bị vô hiệu hóa trên hệ thống!"
+        echo "Đang kích hoạt IPv6..."
+        sysctl -w net.ipv6.conf.all.disable_ipv6=0
+        echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
+        if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
+            echo "Lỗi: Không thể kích hoạt IPv6! Vui lòng kiểm tra cấu hình hệ thống."
+            exit 1
+        fi
+    fi
+    echo "IPv6 đã được kích hoạt."
+}
+
+# Kiểm tra IPv6 có được kích hoạt không
 check_ipv6_enabled
 
-# Tự động phát hiện hoặc nhập dải IPv6
+# Nhập thủ công dải IPv6
 IPV6_RANGE=$(get_ipv6_range)
 if [ $? -ne 0 ]; then
     echo "Lỗi: Không thể xác định dải IPv6!"
@@ -117,7 +98,7 @@ fi
 
 # Cài đặt thư viện Python
 echo "Cài đặt thư viện Python..."
-pip3 install python-telegram-bot ipaddress
+pip3 install pyridine-telegram-bot ipaddress
 
 # Tạo file cấu hình Squid
 echo "Tạo file cấu hình Squid tại /etc/squid/squid.conf..."
