@@ -66,7 +66,7 @@ def get_ipv6_range():
             return data.get("ipv6_range")
     
     while True:
-        ipv6_range = input("Nhập dải IPv6 /64 (ví dụ: 2405:19c0:3:2e45::/64): ").strip()
+        ipv6_range = input("Nhập dải IPv6 /64 (ví dụ: 2001:ee0:48cc:2810::/64): ").strip()
         try:
             network = ipaddress.IPv6Network(ipv6_range, strict=True)
             if network.prefixlen != 64:
@@ -78,14 +78,37 @@ def get_ipv6_range():
         except ValueError as e:
             print(f"Lỗi: {e}. Vui lòng nhập dải IPv6 /64 hợp lệ.")
 
-# Tạo địa chỉ IPv6 từ dải /64
+# Tạo địa chỉ IPv6 từ dải /64 ở dạng đầy đủ
 def generate_ipv6_from_range(ipv6_range, index):
     try:
         network = ipaddress.IPv6Network(ipv6_range)
-        return str(network[index])
+        ipv6 = ipaddress.IPv6Address(network[index]).exploded
+        return ipv6
     except Exception as e:
         print(f"DEBUG: Error generating IPv6: {str(e)}")
         return None
+
+# Gán địa chỉ IPv6 vào giao diện mạng
+def assign_ipv6(ipv6):
+    try:
+        # Tìm giao diện mạng chính
+        result = subprocess.run("ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        interface = result.stdout.decode().strip()
+        if not interface:
+            print("DEBUG: No network interface found")
+            return False
+        
+        # Gán IPv6
+        cmd = f"ip -6 addr add {ipv6}/64 dev {interface}"
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            print(f"DEBUG: Failed to assign IPv6 {ipv6}: {result.stderr.decode()}")
+            return False
+        print(f"DEBUG: Assigned IPv6 {ipv6} to {interface}")
+        return True
+    except Exception as e:
+        print(f"DEBUG: Error assigning IPv6: {str(e)}")
+        return False
 
 # Lấy IPv6 chưa sử dụng
 def get_unused_ipv6(proxies, ipv6_range):
@@ -94,7 +117,8 @@ def get_unused_ipv6(proxies, ipv6_range):
     for _ in range(100):  # Thử tối đa 100 địa chỉ
         ipv6 = generate_ipv6_from_range(ipv6_range, index)
         if ipv6 and ipv6 not in used_ipv6:
-            return ipv6
+            if assign_ipv6(ipv6):
+                return ipv6
         index += 1
     return None
 
@@ -136,12 +160,6 @@ def is_squid_running():
 def add_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
         print("Squid is not running. Please start Squid service.")
-        return False
-
-    # Kiểm tra xem địa chỉ IPv6 có được gán trên VPS
-    result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if ipv6 not in result.stdout.decode():
-        print(f"DEBUG: IPv6 {ipv6} not assigned on VPS")
         return False
 
     with open(SQUID_CONF, "r") as f:
@@ -186,7 +204,7 @@ def add_port_and_delay_pool(ipv6, port):
         return False
     
     # Kiểm tra cổng có được mở không
-    time.sleep(1)  # Đợi Squid reload
+    time.sleep(2)  # Đợi Squid reload lâu hơn
     result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Port {port} is not open!")
@@ -261,7 +279,7 @@ def check_expired_periodically():
     while True:
         update_first_connect()
         delete_expired()
-        time.sleep(800)  # 24 giờ
+        time.sleep(86400)  # 24 giờ
 
 # Kiểm tra quyền admin
 def restrict_to_admin(func):
@@ -360,7 +378,7 @@ def new_proxy(update, context):
 
         ipv6 = get_unused_ipv6(proxies, ipv6_range)
         if not ipv6:
-            update.message.reply_text("Không còn địa chỉ IPv6 trống!")
+            update.message.reply_text("Không còn địa chỉ IPv6 trống hoặc không thể gán IPv6!")
             return
 
         username = generate_username()
@@ -485,14 +503,3 @@ def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("new", new_proxy))
-    dp.add_handler(CommandHandler("xoa", delete_proxy))
-    dp.add_handler(CommandHandler("xoaall", delete_all))
-    dp.add_handler(CommandHandler("list", list_used, pass_args=True))
-    dp.add_handler(CommandHandler("list2", list_unused))
-    dp.add_handler(CommandHandler("check", check_proxy))
-    dp.add_handler(CommandHandler("proxy", show_proxy_count))
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == "__main__":
-    main()
