@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script cài đặt môi trường proxy trên CentOS 7.9
+# Script cài đặt môi trường proxy trên CentOS 7.9 với giới hạn băng thông
 
 # Cập nhật hệ thống
 yum update -y
@@ -22,7 +22,7 @@ sysctl -w net.ipv6.conf.default.disable_ipv6=0
 echo "net.ipv6.conf.all.disable_ipv6 = 0" >> /etc/sysctl.conf
 echo "net.ipv6.conf.default.disable_ipv6 = 0" >> /etc/sysctl.conf
 
-# Cấu hình Squid
+# Cấu hình Squid với delay_pools
 cat << EOF > /etc/squid/squid.conf
 # Cấu hình Squid cho proxy HTTP
 acl SSL_ports port 443
@@ -46,6 +46,10 @@ http_access deny all
 
 # Bật log
 access_log /var/log/squid/access.log squid
+
+# Cấu hình giới hạn băng thông (delay pools)
+delay_pools 0
+# Các pool sẽ được thêm động bởi proxy_manager.py
 EOF
 
 # Tạo file mật khẩu
