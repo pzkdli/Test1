@@ -89,7 +89,7 @@ def generate_ipv6_from_range(ipv6_range, index):
 
 # Lấy IPv6 chưa sử dụng
 def get_unused_ipv6(proxies, ipv6_range):
-    used_ipv6 = {proxy.get("ipv6", proxy.get("ip")) for proxy in proxies if proxy.get("ipv6") or proxy.get("ip")}  # Hỗ trợ cả "ipv6" và "ip"
+    used_ipv6 = {proxy.get("ipv6", proxy.get("ip")) for proxy in proxies if proxy.get("ipv6") or proxy.get("ip")}
     index = len(used_ipv6) + 1  # Bắt đầu từ 1 để tránh ::0
     for _ in range(100):  # Thử tối đa 100 địa chỉ
         ipv6 = generate_ipv6_from_range(ipv6_range, index)
@@ -122,7 +122,9 @@ def get_used_ports():
 # Kiểm tra trạng thái Squid
 def is_squid_running():
     result = subprocess.run("systemctl is-active squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return result.stdout.decode().strip() == "active"
+    status = result.stdout.decode().strip() == "active"
+    print(f"DEBUG: Squid status: {status}")
+    return status
 
 # Thêm cổng và delay pool vào Squid
 def add_port_and_delay_pool(ipv6, port):
@@ -165,14 +167,21 @@ def add_port_and_delay_pool(ipv6, port):
     # Kiểm tra cú pháp file cấu hình
     result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error in Squid configuration: {result.stderr.decode()}")
+        print(f"DEBUG: Error in Squid configuration: {result.stderr.decode()}")
         return False
     
     # Tải lại cấu hình Squid
     result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error reconfiguring Squid: {result.stderr.decode()}")
+        print(f"DEBUG: Error reconfiguring Squid: {result.stderr.decode()}")
         return False
+    
+    # Kiểm tra cổng có được mở không
+    result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"DEBUG: Port {port} is not open!")
+        return False
+    print(f"DEBUG: Port {port} is open")
     return True
 
 # Xóa cổng và delay pool khỏi Squid
@@ -201,13 +210,13 @@ def remove_port_and_delay_pool(ipv6, port):
     # Kiểm tra cú pháp file cấu hình
     result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error in Squid configuration: {result.stderr.decode()}")
+        print(f"DEBUG: Error in Squid configuration: {result.stderr.decode()}")
         return False
     
     # Tải lại cấu hình Squid
     result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error reconfiguring Squid: {result.stderr.decode()}")
+        print(f"DEBUG: Error reconfiguring Squid: {result.stderr.decode()}")
         return False
     return True
 
@@ -365,6 +374,7 @@ def new_proxy(update, context):
         if not add_port_and_delay_pool(ipv6, port):
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid. Vui lòng kiểm tra dịch vụ Squid!")
             return
+        print(f"DEBUG: Added proxy {ipv4}:{port} with IPv6 {ipv6}")
 
     save_proxies(proxies)
     
