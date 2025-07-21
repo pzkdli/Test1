@@ -20,25 +20,48 @@ MIN_PORT = 10000
 MAX_PORT = 60000
 MAX_PROXIES = 2000  # Tối đa 2000 proxy
 
-# Tạo mật khẩu ngẫu nhiên (4 chữ cái thường)
+# Tạo mật khẩu ngẫu nhiên (8 chữ cái thường)
 def generate_password():
-    return ''.join(random.choices(string.ascii_lowercase, k=4))
+    return ''.join(random.choices(string.ascii_lowercase, k=8))
 
 # Lấy IPv4 của VPS
 def get_vps_ip():
     try:
-        # Sử dụng lệnh `ip` để lấy địa chỉ IPv4 của giao diện mạng chính
-        result = subprocess.check_output("ip -4 addr show | grep inet | awk '{print $2}' | cut -d'/' -f1 | head -n 1", shell=True).decode().strip()
+        # Phương pháp 1: Sử dụng lệnh `ip` để lấy IPv4
+        result = subprocess.check_output("ip -4 addr show | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d'/' -f1 | head -n 1", shell=True).decode().strip()
         if result:
             return result
-        # Fallback: Sử dụng socket để lấy IPv4
+    except:
+        pass
+
+    try:
+        # Phương pháp 2: Sử dụng ifconfig (nếu ip không hoạt động)
+        result = subprocess.check_output("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1", shell=True).decode().strip()
+        if result:
+            return result
+    except:
+        pass
+
+    try:
+        # Phương pháp 3: Sử dụng socket để lấy IPv4
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if ip and ip != "127.0.0.1":
+            return ip
     except:
-        return "127.0.0.1"  # Fallback nếu không lấy được IP
+        pass
+
+    try:
+        # Phương pháp 4: Sử dụng API bên ngoài
+        result = subprocess.check_output("curl -s -4 ifconfig.me", shell=True).decode().strip()
+        if result:
+            return result
+    except:
+        pass
+
+    return "127.0.0.1"  # Fallback nếu tất cả phương pháp thất bại
 
 # Đọc proxies từ file JSON
 def load_proxies():
@@ -124,7 +147,7 @@ def remove_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -137,7 +160,7 @@ def update_first_connect():
         with open(SQUID_LOG, "r") as log:
             for line in log:
                 for proxy in proxies:
-                    if proxy["first_connect"] is None and f":{proxy['port']}" in line:
+                    if proxy["first_connect"] is None and f":{province['port']}" in line:
                         proxy["first_connect"] = datetime.now().isoformat()
                         save_proxies(proxies)
                         break
@@ -267,7 +290,7 @@ def list_used(update, context):
     proxies = load_proxies()
     used_proxies = [p for p in proxies if p["first_connect"] is not None]
     if not used_proxies:
-        update.message.reply_text("Không có proxy nào đang sử sử dụng!")
+        update.message.reply_text("Không có proxy nào đang sử dụng!")
         return
 
     page = 1
