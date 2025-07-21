@@ -49,7 +49,7 @@ fi
 # Tạo file cấu hình Squid
 echo "Tạo file cấu hình Squid tại /etc/squid/squid.conf..."
 cat > /etc/squid/squid.conf << 'EOF'
-acl localnet src 0.0.0.0/0
+acl localnet src all
 acl SSL_ports port 443
 acl Safe_ports port 80
 acl Safe_ports port 443
