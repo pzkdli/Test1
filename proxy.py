@@ -57,11 +57,11 @@ def add_port_and_delay_pool(port):
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_")) + 1
     
     # Thêm cổng vào trước http_access
-    http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access "))
+    http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
     new_lines.insert(http_access_index, f"http_port {port}\n")
     
     # Cập nhật delay_pools
-    delay_pools_index = next(i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông"))
+    delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
     new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
     
     # Thêm cấu hình delay pool
@@ -75,7 +75,9 @@ def add_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    subprocess.run("squid -k reconfigure", shell=True)
+    result = subprocess.run("squid -k reconfigure", shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error reconfiguring Squid: {result.stderr}")
 
 # Xóa cổng và delay pool khỏi Squid
 def remove_port_and_delay_pool(port):
@@ -90,14 +92,16 @@ def remove_port_and_delay_pool(port):
                  not line.startswith(f"delay_parameters {pool_count} ") and 
                  not line.startswith(f"delay_access {pool_count} ")]
     new_lines = [line for line in new_lines if not line.startswith("delay_pools ")]
-    delay_pools_index = next(i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông"))
+    delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
     new_lines.insert(delay_pools_index + 1, f"delay_pools {pool_count - 1}\n")
     
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    subprocess.run("squid -k reconfigure", shell=True)
+    result = subprocess.run("squid -k reconfigure", shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error reconfiguring Squid: {result.stderr}")
 
 # Kiểm tra log Squid để cập nhật thời gian kết nối đầu tiên
 def update_first_connect():
