@@ -6,17 +6,24 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Kiểm tra Python3 có sẵn không
+if ! command -v python3 &> /dev/null; then
+    echo "Lỗi: Python3 không được cài đặt! Cài đặt Python3..."
+    yum install -y python3 python3-pip || apt-get install -y python3 python3-pip
+fi
+
 # Hàm kiểm tra định dạng IPv6
 validate_ipv6() {
     local input=$1
-    # Kiểm tra định dạng IPv6 hợp lệ với /64
-    if [[ ! $input =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
+    # Kiểm tra định dạng IPv6 với /64
+    if [[ ! $input =~ ^[0-9a-fA-F:]{2,39}/64$ ]]; then
         echo "Lỗi: Địa chỉ IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f:0000:0000:0000:0001/64"
         return 1
     fi
-    python3 -c "import ipaddress; ipaddress.IPv6Network('$input', strict=True)" 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Lỗi: Địa chỉ IPv6 không hợp lệ hoặc không phải /64!"
+    # Kiểm tra số phần (8 phần hoặc có ::)
+    local parts=$(echo "$input" | cut -d'/' -f1 | tr ':' '\n' | wc -l)
+    if [[ "$input" != *"::"* && $parts -ne 8 ]]; then
+        echo "Lỗi: Địa chỉ IPv6 phải có 8 phần hoặc sử dụng '::'!"
         return 1
     fi
     return 0
@@ -25,9 +32,10 @@ validate_ipv6() {
 # Hàm lấy prefix /64 từ địa chỉ IPv6
 get_ipv6_prefix() {
     local input=$1
+    # Kiểm tra xem Python có xử lý được không
     prefix=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$input', strict=True).compressed)" 2>/dev/null)
     if [ $? -ne 0 ] || [ -z "$prefix" ]; then
-        echo ""
+        echo "Lỗi: Không thể lấy prefix IPv6 từ '$input'!"
         return 1
     fi
     echo "$prefix"
@@ -41,11 +49,13 @@ get_ipv6_range() {
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         read -r ipv6_input
-        ipv6_range=$(get_ipv6_prefix "$ipv6_input")
-        if [ -n "$ipv6_range" ] && validate_ipv6 "$ipv6_range"; then
-            echo "Đã tách prefix IPv6: $ipv6_range"
-            echo "$ipv6_range"
-            return 0
+        if validate_ipv6 "$ipv6_input"; then
+            ipv6_range=$(get_ipv6_prefix "$ipv6_input")
+            if [ $? -eq 0 ] && [ -n "$ipv6_range" ]; then
+                echo "Đã tách prefix IPv6: $ipv6_range"
+                echo "$ipv6_range"
+                return 0
+            fi
         fi
         echo "Lỗi: Địa chỉ IPv6 không hợp lệ! Vui lòng nhập lại ($attempt/$max_attempts)."
         attempt=$((attempt + 1))
@@ -82,7 +92,11 @@ if [ $? -ne 0 ]; then
 fi
 
 # Tạo địa chỉ IPv6 hợp lệ (thêm :1 vào cuối)
-IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.compressed)")
+IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.compressed)" 2>/dev/null)
+if [ $? -ne 0 ] || [ -z "$IPV6_BASE" ]; then
+    echo "Lỗi: Không thể tạo địa chỉ IPv6 cơ bản từ '$IPV6_RANGE'!"
+    exit 1
+fi
 IPV6_ADDRESS="${IPV6_BASE}:1/64"
 
 # Cập nhật hệ thống và cài đặt các gói cần thiết
