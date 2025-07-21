@@ -1,37 +1,23 @@
 import random
 import string
-import sqlite3
+import json
 import subprocess
 from datetime import datetime, timedelta
 from telegram.ext import Updater, CommandHandler, Filters
-from sqlalchemy import create_engine, Column, String, Integer, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 import threading
 import time
+import os
 
 # Cấu hình
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
 ADMIN_ID = 7550813603
 SQUID_LOG = "/var/log/squid/access.log"
-DB_PATH = "/root/proxy.db"
+JSON_PATH = "/root/proxies.json"
 SQUID_CONF = "/etc/squid/squid.conf"
 BANDWIDTH_LIMIT_KBPS = 280000  # 35 MB/s = 280000 kbps
-
-# Kết nối cơ sở dữ liệu
-engine = create_engine(f'sqlite:///{DB_PATH}')
-Base = declarative_base()
-
-class Proxy(Base):
-    __tablename__ = 'proxies'
-    ip = Column(String, primary_key=True)
-    port = Column(Integer, primary_key=True)
-    user = Column(String)
-    pass_ = Column(String, name='pass')
-    first_connect = Column(DateTime)
-
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
+MIN_PORT = 10000
+MAX_PORT = 60000
+MAX_PROXIES = 2000  # Tối đa 2000 proxy
 
 # Tạo mật khẩu ngẫu nhiên (4 chữ cái thường)
 def generate_password():
@@ -44,27 +30,46 @@ def get_vps_ip():
     except:
         return "127.0.0.1"  # Fallback nếu không lấy được IP
 
+# Đọc proxies từ file JSON
+def load_proxies():
+    if os.path.exists(JSON_PATH):
+        with open(JSON_PATH, "r") as f:
+            return json.load(f)
+    return []
+
+# Lưu proxies vào file JSON
+def save_proxies(proxies):
+    with open(JSON_PATH, "w") as f:
+        json.dump(proxies, f, indent=4)
+
 # Kiểm tra cổng đã sử dụng
 def get_used_ports():
-    session = Session()
-    used_ports = [proxy.port for proxy in session.query(Proxy).all()]
-    session.close()
-    return used_ports
+    proxies = load_proxies()
+    return [proxy["port"] for proxy in proxies]
 
-# Thêm cấu hình delay pool cho cổng
-def add_delay_pool(port):
+# Thêm cổng và delay pool vào Squid
+def add_port_and_delay_pool(port):
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
-    # Xóa dòng delay_pools cũ và thêm mới
+    # Xóa dòng delay_pools cũ
     new_lines = [line for line in lines if not line.startswith("delay_pools ")]
-    pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
-    new_lines.insert(new_lines.index("delay_pools 0\n") + 1, f"delay_pools {pool_count + 1}\n")
+    pool_count = sum(1 for line in lines if line.startswith("acl proxy_")) + 1
+    
+    # Thêm cổng vào trước http_access
+    http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access "))
+    new_lines.insert(http_access_index, f"http_port {port}\n")
+    
+    # Cập nhật delay_pools
+    delay_pools_index = next(i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông"))
+    new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
+    
+    # Thêm cấu hình delay pool
     new_lines.append(f"acl proxy_{port} localport {port}\n")
-    new_lines.append(f"delay_class {pool_count + 1} 1\n")
-    new_lines.append(f"delay_parameters {pool_count + 1} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n")
-    new_lines.append(f"delay_access {pool_count + 1} allow proxy_{port}\n")
-    new_lines.append(f"delay_access {pool_count + 1} deny all\n")
+    new_lines.append(f"delay_class {pool_count} 1\n")
+    new_lines.append(f"delay_parameters {pool_count} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n")
+    new_lines.append(f"delay_access {pool_count} allow proxy_{port}\n")
+    new_lines.append(f"delay_access {pool_count} deny all\n")
     
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
@@ -72,19 +77,21 @@ def add_delay_pool(port):
     # Tải lại cấu hình Squid
     subprocess.run("squid -k reconfigure", shell=True)
 
-# Xóa cấu hình delay pool cho cổng
-def remove_delay_pool(port):
+# Xóa cổng và delay pool khỏi Squid
+def remove_port_and_delay_pool(port):
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
-    # Xóa các dòng liên quan đến delay pool của cổng
+    # Xóa các dòng liên quan đến cổng và delay pool
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
-    new_lines = [line for line in lines if not line.startswith(f"acl proxy_{port}\n") and 
+    new_lines = [line for line in lines if not line.startswith(f"http_port {port}\n") and 
+                 not line.startswith(f"acl proxy_{port}\n") and 
                  not line.startswith(f"delay_class {pool_count} ") and 
                  not line.startswith(f"delay_parameters {pool_count} ") and 
                  not line.startswith(f"delay_access {pool_count} ")]
     new_lines = [line for line in new_lines if not line.startswith("delay_pools ")]
-    new_lines.insert(new_lines.index("delay_pools 0\n") + 1, f"delay_pools {pool_count - 1}\n")
+    delay_pools_index = next(i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông"))
+    new_lines.insert(delay_pools_index + 1, f"delay_pools {pool_count - 1}\n")
     
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
@@ -94,31 +101,29 @@ def remove_delay_pool(port):
 
 # Kiểm tra log Squid để cập nhật thời gian kết nối đầu tiên
 def update_first_connect():
-    session = Session()
-    proxies = session.query(Proxy).filter(Proxy.first_connect == None).all()
+    proxies = load_proxies()
     try:
         with open(SQUID_LOG, "r") as log:
             for line in log:
                 for proxy in proxies:
-                    if f":{proxy.port}" in line:
-                        proxy.first_connect = datetime.now()
-                        session.commit()
+                    if proxy["first_connect"] is None and f":{proxy['port']}" in line:
+                        proxy["first_connect"] = datetime.now().isoformat()
+                        save_proxies(proxies)
                         break
     except FileNotFoundError:
         pass  # Bỏ qua nếu log chưa tồn tại
-    session.close()
 
 # Xóa proxy hết hạn (30 ngày kể từ lần kết nối đầu tiên)
 def delete_expired():
-    session = Session()
-    proxies = session.query(Proxy).filter(Proxy.first_connect != None).all()
+    proxies = load_proxies()
+    updated_proxies = []
     for proxy in proxies:
-        if datetime.now() > proxy.first_connect + timedelta(days=30):
-            session.delete(proxy)
-            subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy.port}", shell=True)
-            remove_delay_pool(proxy.port)
-    session.commit()
-    session.close()
+        if proxy["first_connect"] and datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=30) < datetime.now():
+            subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy['port']}", shell=True)
+            remove_port_and_delay_pool(proxy["port"])
+        else:
+            updated_proxies.append(proxy)
+    save_proxies(updated_proxies)
 
 # Chạy kiểm tra hết hạn định kỳ (mỗi 24 giờ)
 def check_expired_periodically():
@@ -148,27 +153,41 @@ def new_proxy(update, context):
         update.message.reply_text("Vui lòng nhập số lượng proxy: /new <số lượng>")
         return
 
-    session = Session()
+    proxies = load_proxies()
+    if len(proxies) + count > MAX_PROXIES:
+        update.message.reply_text(f"Chỉ có thể tạo thêm {MAX_PROXIES - len(proxies)} proxy để không vượt quá {MAX_PROXIES} proxy!")
+        return
+
     vps_ip = get_vps_ip()
     used_ports = get_used_ports()
     new_proxies = []
 
     for _ in range(count):
-        port = random.randint(10000, 60000)
-        while port in used_ports:
-            port = random.randint(10000, 60000)
+        for _ in range(100):  # Thử tối đa 100 lần để tìm cổng trống
+            port = random.randint(MIN_PORT, MAX_PORT)
+            if port not in used_ports:
+                break
+        else:
+            update.message.reply_text("Không tìm được cổng trống sau nhiều lần thử!")
+            return
+
         password = generate_password()
-        proxy = Proxy(ip=vps_ip, port=port, user="vtoan5516", pass_=password)
-        session.add(proxy)
+        proxy = {
+            "ip": vps_ip,
+            "port": port,
+            "user": "vtoan5516",
+            "pass": password,
+            "first_connect": None
+        }
+        proxies.append(proxy)
         new_proxies.append(f"{vps_ip}:{port}:vtoan5516:{password}")
         used_ports.append(port)
         # Thêm user/pass vào Squid
         subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True)
-        # Thêm delay pool
-        add_delay_pool(port)
+        # Thêm cổng và delay pool
+        add_port_and_delay_pool(port)
 
-    session.commit()
-    session.close()
+    save_proxies(proxies)
     update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s):\n" + "\n".join(new_proxies))
 
 # Lệnh /xoa: Xóa proxy riêng lẻ
@@ -182,38 +201,33 @@ def delete_proxy(update, context):
         update.message.reply_text("Vui lòng nhập proxy: /xoa <IPv4:port>")
         return
 
-    session = Session()
-    proxy = session.query(Proxy).filter_by(ip=ip, port=port).first()
-    if proxy:
-        session.delete(proxy)
-        session.commit()
-        subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{port}", shell=True)
-        remove_delay_pool(port)
-        update.message.reply_text(f"Đã xóa proxy {ip}:{port}")
-    else:
+    proxies = load_proxies()
+    updated_proxies = [p for p in proxies if not (p["ip"] == ip and p["port"] == port)]
+    if len(proxies) == len(updated_proxies):
         update.message.reply_text("Proxy không tồn tại!")
-    session.close()
+        return
+
+    save_proxies(updated_proxies)
+    subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{port}", shell=True)
+    remove_port_and_delay_pool(port)
+    update.message.reply_text(f"Đã xóa proxy {ip}:{port}")
 
 # Lệnh /xoaall: Xóa tất cả proxy
 @restrict_to_admin
 def delete_all(update, context):
-    session = Session()
-    proxies = session.query(Proxy).all()
+    proxies = load_proxies()
     for proxy in proxies:
-        session.delete(proxy)
-        subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy.port}", shell=True)
-        remove_delay_pool(proxy.port)
-    session.commit()
-    session.close()
+        subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy['port']}", shell=True)
+        remove_port_and_delay_pool(proxy["port"])
+    save_proxies([])
     update.message.reply_text("Đã xóa tất cả proxy!")
 
 # Lệnh /list 1: Liệt kê proxy đang sử dụng
 @restrict_to_admin
 def list_used(update, context):
-    session = Session()
-    proxies = session.query(Proxy).filter(Proxy.first_connect != None).all()
-    session.close()
-    if not proxies:
+    proxies = load_proxies()
+    used_proxies = [p for p in proxies if p["first_connect"] is not None]
+    if not used_proxies:
         update.message.reply_text("Không có proxy nào đang sử dụng!")
         return
 
@@ -227,28 +241,27 @@ def list_used(update, context):
     per_page = 50
     start = (page - 1) * per_page
     end = start + per_page
-    total_pages = (len(proxies) + per_page - 1) // per_page
+    total_pages = (len(used_proxies) + per_page - 1) // per_page
 
-    if start >= len(proxies):
+    if start >= len(used_proxies):
         update.message.reply_text("Trang không tồn tại!")
         return
 
     result = [f"Page {page}/{total_pages}"]
-    for proxy in proxies[start:end]:
-        days_left = (proxy.first_connect + timedelta(days=30) - datetime.now()).days
-        result.append(f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_} (Còn {days_left} ngày, 35 MB/s)")
+    for proxy in used_proxies[start:end]:
+        days_left = (datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=30) - datetime.now()).days
+        result.append(f"{proxy['ip']}:{proxy['port']}:{proxy['user']}:{proxy['pass']} (Còn {days_left} ngày, 35 MB/s)")
     update.message.reply_text("\n".join(result))
 
 # Lệnh /list2: Liệt kê proxy chưa sử dụng
 @restrict_to_admin
 def list_unused(update, context):
-    session = Session()
-    proxies = session.query(Proxy).filter(Proxy.first_connect == None).all()
-    session.close()
-    if not proxies:
+    proxies = load_proxies()
+    unused_proxies = [p for p in proxies if p["first_connect"] is None]
+    if not unused_proxies:
         update.message.reply_text("Không có proxy nào chưa sử dụng!")
         return
-    result = [f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_} (35 MB/s)" for proxy in proxies]
+    result = [f"{p['ip']}:{p['port']}:{p['user']}:{p['pass']} (35 MB/s)" for p in unused_proxies]
     update.message.reply_text("\n".join(result))
 
 # Main
