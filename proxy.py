@@ -83,11 +83,8 @@ def get_ipv6_range():
 def generate_ipv6_from_range(ipv6_range, index):
     try:
         network = ipaddress.IPv6Network(ipv6_range)
-        # Lấy 64 bit đầu (network prefix)
         prefix = int(network.network_address) & (2**128 - 2**64)
-        # Tạo 64 bit cuối ngẫu nhiên
         random_suffix = random.randint(1, 2**64 - 1)
-        # Kết hợp prefix và suffix
         ipv6_int = prefix | random_suffix
         ipv6 = ipaddress.IPv6Address(ipv6_int).exploded
         return ipv6
@@ -95,23 +92,28 @@ def generate_ipv6_from_range(ipv6_range, index):
         print(f"DEBUG: Error generating IPv6: {str(e)}")
         return None
 
+# Chuẩn hóa địa chỉ IPv6
+def normalize_ipv6(ipv6):
+    try:
+        return ipaddress.IPv6Address(ipv6).compressed
+    except ValueError:
+        return ipv6
+
 # Gán địa chỉ IPv6 vào giao diện mạng
 def assign_ipv6(ipv6):
     try:
-        # Tìm giao diện mạng chính
         result = subprocess.run("ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         interface = result.stdout.decode().strip()
         if not interface:
             print("DEBUG: No network interface found")
             return False
         
-        # Kiểm tra xem IPv6 đã được gán chưa
+        normalized_ipv6 = normalize_ipv6(ipv6)
         result = subprocess.run(f"ip -6 addr show dev {interface}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if ipv6 in result.stdout.decode():
+        if normalized_ipv6 in result.stdout.decode():
             print(f"DEBUG: IPv6 {ipv6} already assigned to {interface}")
             return True
         
-        # Gán IPv6
         cmd = f"ip -6 addr add {ipv6}/64 dev {interface}"
         result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
@@ -125,21 +127,21 @@ def assign_ipv6(ipv6):
 
 # Lấy IPv6 chưa sử dụng
 def get_unused_ipv6(proxies, ipv6_range):
-    used_ipv6 = {proxy.get("ipv6", proxy.get("ip")) for proxy in proxies if proxy.get("ipv6") or proxy.get("ip")}
-    for _ in range(100):  # Thử tối đa 100 địa chỉ
+    used_ipv6 = {normalize_ipv6(proxy.get("ipv6", proxy.get("ip"))) for proxy in proxies if proxy.get("ipv6") or proxy.get("ip")}
+    for _ in range(100):
         ipv6 = generate_ipv6_from_range(ipv6_range, None)
-        if ipv6 and ipv6 not in used_ipv6:
+        if ipv6 and normalize_ipv6(ipv6) not in used_ipv6:
             if assign_ipv6(ipv6):
                 return ipv6
     return None
 
-# Tạo tên người dùng (vtoan + 4 số ngẫu nhiên + 1 chữ cái in hoa)
+# Tạo tên người dùng
 def generate_username():
     numbers = ''.join(random.choices(string.digits, k=4))
     letter = random.choice(string.ascii_uppercase)
     return f"vtoan{numbers}{letter}"
 
-# Tạo mật khẩu ngẫu nhiên (8 chữ cái thường)
+# Tạo mật khẩu ngẫu nhiên
 def generate_password():
     return ''.join(random.choices(string.ascii_lowercase, k=8))
 
@@ -169,7 +171,6 @@ def is_squid_running():
 
 # Thêm cổng và delay pool vào Squid
 def add_port_and_delay_pool(ipv6, port):
-    # Kiểm tra và khởi động Squid nếu chưa chạy
     if not is_squid_running():
         print("Squid is not running. Attempting to start Squid service...")
         result = subprocess.run("systemctl start squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -177,33 +178,27 @@ def add_port_and_delay_pool(ipv6, port):
             error = result.stderr.decode().strip()
             print(f"DEBUG: Failed to start Squid: {error}")
             return False, f"Không thể khởi động Squid: {error}"
-        time.sleep(5)  # Đợi 5 giây để Squid khởi động
+        time.sleep(5)
         if not is_squid_running():
             return False, "Squid vẫn không chạy sau khi thử khởi động"
 
-    # Kiểm tra IPv6 có được gán không
+    normalized_ipv6 = normalize_ipv6(ipv6)
     result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if ipv6 not in result.stdout.decode():
+    if normalized_ipv6 not in result.stdout.decode():
         return False, f"IPv6 {ipv6} không được gán trên hệ thống"
 
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
-    # Xóa dòng delay_pools cũ
     new_lines = [line for line in lines if not line.startswith("delay_pools ")]
-    
-    # Đếm số lượng pool hiện có
     pool_count = sum(1 for line in new_lines if line.startswith("acl proxy_")) + 1
     
-    # Thêm cổng vào trước http_access
     http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
     new_lines.insert(http_access_index, f"http_port [{ipv6}]:{port}\n")
     
-    # Cập nhật delay_pools
     delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
     new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
     
-    # Thêm cấu hình delay pool
     new_lines[delay_pools_index + 1:delay_pools_index + 1] = [
         f"acl proxy_{port} localport {port}\n",
         f"delay_class {pool_count} 1\n",
@@ -215,27 +210,22 @@ def add_port_and_delay_pool(ipv6, port):
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
     
-    # Kiểm tra cú pháp file cấu hình
     result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error = result.stderr.decode().strip()
         print(f"DEBUG: Error in Squid configuration: {error}")
         return False, f"Cú pháp cấu hình Squid lỗi: {error}"
     
-    # Tải lại cấu hình Squid
     result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         error = result.stderr.decode().strip()
         print(f"DEBUG: Error reconfiguring Squid: {error}")
         return False, f"Lỗi khi reload Squid: {error}"
     
-    # Kiểm tra cổng có được mở không
-    time.sleep(15)  # Đợi 15 giây để Squid reload
+    time.sleep(15)
     result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Port {port} is not open!")
-        # Kiểm tra log Squid, chỉ lấy 10 dòng cuối
-        log_output = ""
         try:
             result = subprocess.run(f"tail -n 10 {SQUID_CACHE_LOG}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             log_output = f"Log {SQUID_CACHE_LOG}:\n{result.stdout.decode().strip()}"
@@ -258,7 +248,6 @@ def remove_port_and_delay_pool(ipv6, port):
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
-    # Xóa các dòng liên quan đến cổng và delay pool
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
     new_lines = [line for line in lines if not line.startswith(f"http_port [{ipv6}]:{port}\n") and 
                  not line.startswith(f"acl proxy_{port}\n") and 
@@ -272,13 +261,11 @@ def remove_port_and_delay_pool(ipv6, port):
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
     
-    # Kiểm tra cú pháp file cấu hình
     result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Error in Squid configuration: {result.stderr.decode()}")
         return False
     
-    # Tải lại cấu hình Squid
     result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Error reconfiguring Squid: {result.stderr.decode()}")
@@ -297,7 +284,7 @@ def update_first_connect():
                         save_proxies(proxies)
                         break
     except FileNotFoundError:
-        pass  # Bỏ qua nếu log chưa tồn tại
+        pass
 
 # Xóa proxy hết hạn
 def delete_expired():
@@ -311,12 +298,12 @@ def delete_expired():
             updated_proxies.append(proxy)
     save_proxies(updated_proxies)
 
-# Chạy kiểm tra hết hạn định kỳ (mỗi 24 giờ)
+# Chạy kiểm tra hết hạn định kỳ
 def check_expired_periodically():
     while True:
         update_first_connect()
         delete_expired()
-        time.sleep(86400)  # 24 giờ
+        time.sleep(86400)
 
 # Kiểm tra quyền admin
 def restrict_to_admin(func):
@@ -327,13 +314,15 @@ def restrict_to_admin(func):
         return func(update, context)
     return wrapper
 
-# Lệnh /proxy: Hiển thị số lượng proxy đã sử dụng và chưa sử dụng
+# Lệnh /proxy: Hiển thị số lượng proxy
 @restrict_to_admin
 def show_proxy_count(update, context):
     proxies = load_proxies()
     used_proxies = [p for p in proxies if p["first_connect"] is not None]
     unused_proxies = [p for p in proxies if p["first_connect"] is None]
     update.message.reply_text(f"Đã sử dụng: {len(used_proxies)}\nChưa sử dụng: {len(unused_proxies)}")
+
+
 
 # Lệnh /check: Kiểm tra proxy
 @restrict_to_admin
@@ -372,13 +361,13 @@ def check_proxy(update, context):
             print(f"DEBUG: curl exception for {url}: {str(e)}")
 
     update.message.reply_text("\n".join(results))
-    
-# Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
+
+# Lệnh /new: Tạo proxy mới
 @restrict_to_admin
 def new_proxy(update, context):
     try:
         count = int(context.args[0])
-        lifetime = int(context.args[1])  # Số ngày sống của proxy
+        lifetime = int(context.args[1])
         if count <= 0 or lifetime <= 0:
             update.message.reply_text("Số lượng proxy và số ngày phải lớn hơn 0!")
             return
@@ -405,7 +394,7 @@ def new_proxy(update, context):
     new_proxies = []
 
     for _ in range(count):
-        for _ in range(100):  # Thử tối đa 100 lần để tìm cổng trống
+        for _ in range(100):
             port = random.randint(MIN_PORT, MAX_PORT)
             if port not in used_ports:
                 break
@@ -432,13 +421,10 @@ def new_proxy(update, context):
         proxies.append(proxy)
         new_proxies.append(f"{ipv4}:{port}:{username}:{password}")
         used_ports.append(port)
-        # Thêm user/pass vào Squid
         result = subprocess.run(f"htpasswd -b /etc/squid/passwd {username} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         print(f"DEBUG: htpasswd result for {username}: {result.returncode}, stderr: {result.stderr.decode()}")
-        # Thêm cổng và delay pool
         success, error_msg = add_port_and_delay_pool(ipv6, port)
         if not success:
-            # Cắt ngắn error_msg để tránh lỗi Telegram
             error_msg = error_msg[:1000] + "..." if len(error_msg) > 1000 else error_msg
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid: {error_msg}")
             return
@@ -446,7 +432,6 @@ def new_proxy(update, context):
 
     save_proxies(proxies)
     
-    # Xử lý đầu ra dựa trên số lượng proxy
     if count < 10:
         update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s, sống {lifetime} ngày):\n" + "\n".join(new_proxies))
     else:
@@ -533,13 +518,8 @@ def list_unused(update, context):
 
 # Main
 def main():
-    # Nhập dải IPv6 khi khởi động
     get_ipv6_range()
-    
-    # Khởi động thread kiểm tra hết hạn
     threading.Thread(target=check_expired_periodically, daemon=True).start()
-    
-    # Khởi động bot Telegram
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("new", new_proxy))
