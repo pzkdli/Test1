@@ -8,6 +8,7 @@ import threading
 import time
 import os
 import socket
+import re
 
 # Cấu hình
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
@@ -24,41 +25,23 @@ MAX_PROXIES = 2000  # Tối đa 2000 proxy
 def generate_password():
     return ''.join(random.choices(string.ascii_lowercase, k=8))
 
-# Lấy IPv4 của VPS
-def get_vps_ip():
+# Lấy danh sách IPv6 của VPS
+def get_vps_ipv6_list():
     try:
-        result = subprocess.check_output("ip -4 addr show | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d'/' -f1 | head -n 1", shell=True).decode().strip()
-        print(f"DEBUG: IP from ip command: {result}")
-        if result:
-            return result
-    except:
-        pass
-    try:
-        result = subprocess.check_output("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1", shell=True).decode().strip()
-        print(f"DEBUG: IP from ifconfig: {result}")
-        if result:
-            return result
-    except:
-        pass
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        print(f"DEBUG: IP from socket: {ip}")
-        s.close()
-        if ip and ip != "127.0.0.1":
-            return ip
-    except:
-        pass
-    try:
-        result = subprocess.check_output("curl -s -4 ifconfig.me", shell=True).decode().strip()
-        print(f"DEBUG: IP from curl: {result}")
-        if result:
-            return result
-    except:
-        pass
-    print("DEBUG: Falling back to 127.0.0.1")
-    return "127.0.0.1"
+        result = subprocess.check_output("ip -6 addr show | grep inet6 | grep global | awk '{print $2}' | cut -d'/' -f1", shell=True).decode().strip()
+        ipv6_list = result.split('\n')
+        ipv6_list = [ip for ip in ipv6_list if ip and ':' in ip]
+        print(f"DEBUG: IPv6 list: {ipv6_list}")
+        return ipv6_list
+    except Exception as e:
+        print(f"DEBUG: Error getting IPv6 list: {str(e)}")
+        return []
+
+# Lấy IPv6 chưa sử dụng
+def get_unused_ipv6(proxies, ipv6_list):
+    used_ipv6 = {proxy["ip"] for proxy in proxies}
+    available_ipv6 = [ip for ip in ipv6_list if ip not in used_ipv6]
+    return random.choice(available_ipv6) if available_ipv6 else None
 
 # Đọc proxies từ file JSON
 def load_proxies():
@@ -83,7 +66,7 @@ def is_squid_running():
     return result.stdout.decode().strip() == "active"
 
 # Thêm cổng và delay pool vào Squid
-def add_port_and_delay_pool(port):
+def add_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
         print("Squid is not running. Please start Squid service.")
         return False
@@ -97,9 +80,9 @@ def add_port_and_delay_pool(port):
     # Đếm số lượng pool hiện có (dựa trên acl proxy_)
     pool_count = sum(1 for line in new_lines if line.startswith("acl proxy_")) + 1
     
-    # Thêm cổng vào trước http_access
+    # Thêm cổng vào trước http_access, bind với IPv6
     http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
-    new_lines.insert(http_access_index, f"http_port {port}\n")
+    new_lines.insert(http_access_index, f"http_port [{ipv6}]:{port}\n")
     
     # Tìm vị trí để chèn cấu hình delay pool
     delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
@@ -134,7 +117,7 @@ def add_port_and_delay_pool(port):
     return True
 
 # Xóa cổng và delay pool khỏi Squid
-def remove_port_and_delay_pool(port):
+def remove_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
         print("Squid is not running. Please start Squid service.")
         return False
@@ -144,7 +127,7 @@ def remove_port_and_delay_pool(port):
     
     # Xóa các dòng liên quan đến cổng và delay pool
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
-    new_lines = [line for line in lines if not line.startswith(f"http_port {port}\n") and 
+    new_lines = [line for line in lines if not line.startswith(f"http_port [{ipv6}]:{port}\n") and 
                  not line.startswith(f"acl proxy_{port}\n") and 
                  not line.startswith(f"delay_class {pool_count} ") and 
                  not line.startswith(f"delay_parameters {pool_count} ") and 
@@ -189,8 +172,8 @@ def delete_expired():
     updated_proxies = []
     for proxy in proxies:
         if proxy["first_connect"] and datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=proxy["lifetime"]) < datetime.now():
-            subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy['port']}", shell=True)
-            remove_port_and_delay_pool(proxy["port"])
+            subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
+            remove_port_and_delay_pool(proxy["ip"], proxy["port"])
         else:
             updated_proxies.append(proxy)
     save_proxies(updated_proxies)
@@ -211,7 +194,15 @@ def restrict_to_admin(func):
         return func(update, context)
     return wrapper
 
-# Lệnh /check: Kiểm tra proxy qua https://www.myip.com/ và https://ipconfig.io/
+# Lệnh /proxy: Hiển thị số lượng proxy đã sử dụng và chưa sử dụng
+@restrict_to_admin
+def show_proxy_count(update, context):
+    proxies = load_proxies()
+    used_proxies = [p for p in proxies if p["first_connect"] is not None]
+    unused_proxies = [p for p in proxies if p["first_connect"] is None]
+    update.message.reply_text(f"Đã sử dụng: {len(used_proxies)}\nChưa sử dụng: {len(unused_proxies)}")
+
+# Lệnh /check: Kiểm tra proxy qua https://www.myip.com/, https://ipconfig.io/, và http://ifconfig.me
 @restrict_to_admin
 def check_proxy(update, context):
     try:
@@ -219,27 +210,34 @@ def check_proxy(update, context):
         ip, port, user, password = proxy.split(":")
         port = int(port)
     except (IndexError, ValueError):
-        update.message.reply_text("Vui lòng nhập proxy theo định dạng: /check <IPv4:port:user:pass>")
+        update.message.reply_text("Vui lòng nhập proxy theo định dạng: /check <IPv6:port:user:pass>")
         return
 
     # Danh sách các URL để kiểm tra
-    test_urls = ["https://www.myip.com/", "https://ipconfig.io/"]
+    test_urls = ["https://www.myip.com/", "https://ipconfig.io/", "http://ifconfig.me"]
     results = []
 
     for url in test_urls:
-        cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} --connect-timeout 10 {url}"
+        cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} --connect-timeout 10 -w 'HTTP_CODE:%{{http_code}}' {url}"
+        print(f"DEBUG: Running curl command: {cmd}")
         try:
             result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-            if result.returncode == 0:
-                output = result.stdout.decode()
-                # Giới hạn độ dài đầu ra để tránh tin nhắn Telegram quá dài
-                results.append(f"Proxy {ip}:{port} hoạt động với {url}! Kết quả:\n{output[:200]}...")
+            stderr = result.stderr.decode().strip()
+            stdout = result.stdout.decode().strip()
+            http_code = stdout.split("HTTP_CODE:")[-1] if "HTTP_CODE:" in stdout else "N/A"
+            stdout = stdout.split("HTTP_CODE:")[0].strip()
+            print(f"DEBUG: curl result for {url}: returncode={result.returncode}, http_code={http_code}, stderr={stderr}")
+            
+            if result.returncode == 0 and http_code == "200":
+                results.append(f"Proxy {ip}:{port} hoạt động với {url}! Kết quả:\n{stdout[:200]}...")
             else:
-                results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: {result.stderr.decode()}")
+                results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: returncode={result.returncode}, http_code={http_code}, stderr={stderr}")
         except subprocess.TimeoutExpired:
             results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: Connection timeout")
+            print(f"DEBUG: curl timeout for {url}")
         except Exception as e:
             results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: {str(e)}")
+            print(f"DEBUG: curl exception for {url}: {str(e)}")
 
     update.message.reply_text("\n".join(results))
 
@@ -261,8 +259,11 @@ def new_proxy(update, context):
         update.message.reply_text(f"Chỉ có thể tạo thêm {MAX_PROXIES - len(proxies)} proxy để không vượt quá {MAX_PROXIES} proxy!")
         return
 
-    vps_ip = get_vps_ip()
-    print(f"DEBUG: VPS IP = {vps_ip}")
+    ipv6_list = get_vps_ipv6_list()
+    if not ipv6_list:
+        update.message.reply_text("Không tìm thấy địa chỉ IPv6 trên VPS!")
+        return
+
     used_ports = get_used_ports()
     new_proxies = []
 
@@ -275,9 +276,14 @@ def new_proxy(update, context):
             update.message.reply_text("Không tìm được cổng trống sau nhiều lần thử!")
             return
 
+        ipv6 = get_unused_ipv6(proxies, ipv6_list)
+        if not ipv6:
+            update.message.reply_text("Không còn địa chỉ IPv6 trống!")
+            return
+
         password = generate_password()
         proxy = {
-            "ip": vps_ip,
+            "ip": ipv6,
             "port": port,
             "user": "vtoan5516",
             "pass": password,
@@ -285,13 +291,13 @@ def new_proxy(update, context):
             "lifetime": lifetime
         }
         proxies.append(proxy)
-        new_proxies.append(f"{vps_ip}:{port}:vtoan5516:{password}")
+        new_proxies.append(f"{ipv6}:{port}:vtoan5516:{password}")
         used_ports.append(port)
-        # Thêm user/pass vào Squid
-        result = subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f"DEBUG: htpasswd result for vtoan5516_{port}: {result.returncode}, stderr: {result.stderr.decode()}")
+        # Thêm user/pass vào Squid với tên cố định vtoan5516
+        result = subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516 {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(f"DEBUG: htpasswd result for vtoan5516: {result.returncode}, stderr: {result.stderr.decode()}")
         # Thêm cổng và delay pool
-        if not add_port_and_delay_pool(port):
+        if not add_port_and_delay_pool(ipv6, port):
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid. Vui lòng kiểm tra dịch vụ Squid!")
             return
 
@@ -303,10 +309,10 @@ def new_proxy(update, context):
 def delete_proxy(update, context):
     try:
         proxy = context.args[0]
-        ip, port = proxy.split(":")
+        ip, port = proxy.split(":")[:2]
         port = int(port)
     except (IndexError, ValueError):
-        update.message.reply_text("Vui lòng nhập proxy: /xoa <IPv4:port>")
+        update.message.reply_text("Vui lòng nhập proxy: /xoa <IPv6:port>")
         return
 
     proxies = load_proxies()
@@ -315,9 +321,10 @@ def delete_proxy(update, context):
         update.message.reply_text("Proxy không tồn tại!")
         return
 
+    proxy_to_delete = next(p for p in proxies if p["ip"] == ip and p["port"] == port)
     save_proxies(updated_proxies)
-    subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{port}", shell=True)
-    remove_port_and_delay_pool(port)
+    subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
+    remove_port_and_delay_pool(ip, port)
     update.message.reply_text(f"Đã xóa proxy {ip}:{port}")
 
 # Lệnh /xoaall: Xóa tất cả proxy
@@ -325,8 +332,8 @@ def delete_proxy(update, context):
 def delete_all(update, context):
     proxies = load_proxies()
     for proxy in proxies:
-        subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy['port']}", shell=True)
-        remove_port_and_delay_pool(proxy["port"])
+        subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
+        remove_port_and_delay_pool(proxy["ip"], proxy["port"])
     save_proxies([])
     update.message.reply_text("Đã xóa tất cả proxy!")
 
@@ -386,6 +393,7 @@ def main():
     dp.add_handler(CommandHandler("list", list_used, pass_args=True))
     dp.add_handler(CommandHandler("list2", list_unused))
     dp.add_handler(CommandHandler("check", check_proxy))
+    dp.add_handler(CommandHandler("proxy", show_proxy_count))
     updater.start_polling()
     updater.idle()
 
