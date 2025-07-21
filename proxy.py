@@ -130,16 +130,26 @@ def assign_ipv6(ipv6):
             return False
         
         normalized_ipv6 = normalize_ipv6(ipv6)
+        # Kiểm tra xem địa chỉ IPv6 đã được gán chưa
         result = subprocess.run(f"ip -6 addr show dev {interface}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if normalized_ipv6 in result.stdout.decode():
             print(f"DEBUG: IPv6 {ipv6} already assigned to {interface}")
             return True
         
+        # Gán địa chỉ IPv6
         cmd = f"ip -6 addr add {ipv6}/64 dev {interface}"
         result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             print(f"DEBUG: Failed to assign IPv6 {ipv6}: {result.stderr.decode()}")
             return False
+        
+        # Đợi và kiểm tra lại địa chỉ IPv6
+        time.sleep(2)
+        result = subprocess.run(f"ip -6 addr show dev {interface}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if normalized_ipv6 not in result.stdout.decode():
+            print(f"DEBUG: IPv6 {ipv6} not found on {interface} after assignment")
+            return False
+        
         print(f"DEBUG: Assigned IPv6 {ipv6} to {interface}")
         return True
     except Exception as e:
@@ -196,94 +206,115 @@ def is_squid_running():
 
 # Thêm cổng và delay pool vào Squid
 def add_port_and_delay_pool(ipv6, port):
-    if not is_squid_running():
-        print("Squid is not running. Attempting to start Squid service...")
-        result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            error = result.stderr.decode().strip()
-            print(f"DEBUG: Failed to start Squid: {error}")
-            return False, f"Không thể khởi động Squid: {error}"
-        time.sleep(5)
+    max_retries = 3
+    retry_delay = 5
+    attempt = 1
+
+    while attempt <= max_retries:
         if not is_squid_running():
-            return False, "Squid vẫn không chạy sau khi thử khởi động"
+            print(f"Attempt {attempt}/{max_retries}: Squid is not running. Attempting to start Squid service...")
+            result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                error = result.stderr.decode().strip()
+                print(f"DEBUG: Failed to start Squid: {error}")
+                return False, f"Không thể khởi động Squid: {error}"
+            time.sleep(retry_delay)
+            if not is_squid_running():
+                print(f"DEBUG: Squid still not running after attempt {attempt}")
+                attempt += 1
+                continue
 
-    normalized_ipv6 = normalize_ipv6(ipv6)
-    result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if normalized_ipv6 not in result.stdout.decode():
-        return False, f"IPv6 {ipv6} không được gán trên hệ thống"
+        normalized_ipv6 = normalize_ipv6(ipv6)
+        result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if normalized_ipv6 not in result.stdout.decode():
+            return False, f"IPv6 {ipv6} không được gán trên hệ thống"
 
-    try:
-        with open(SQUID_CONF, "r") as f:
-            lines = f.readlines()
-    except Exception as e:
-        print(f"DEBUG: Error reading Squid config: {str(e)}")
-        return False, f"Không thể đọc file cấu hình Squid: {str(e)}"
-    
-    new_lines = [line for line in lines if not line.startswith("delay_pools ")]
-    pool_count = sum(1 for line in new_lines if line.startswith("acl proxy_")) + 1
-    
-    http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
-    new_lines.insert(http_access_index, f"http_port [{ipv6}]:{port}\n")
-    
-    delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
-    new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
-    
-    new_lines[delay_pools_index + 1:delay_pools_index + 1] = [
-        f"acl proxy_{port} localport {port}\n",
-        f"delay_class {pool_count} 1\n",
-        f"delay_parameters {pool_count} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n",
-        f"delay_access {pool_count} allow proxy_{port}\n",
-        f"delay_access {pool_count} deny all\n"
-    ]
-    
-    try:
-        with open(SQUID_CONF, "w") as f:
-            f.writelines(new_lines)
-    except Exception as e:
-        print(f"DEBUG: Error writing Squid config: {str(e)}")
-        return False, f"Không thể ghi file cấu hình Squid: {str(e)}"
-    
-    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        error = result.stderr.decode().strip()
-        print(f"DEBUG: Error in Squid configuration: {error}")
-        return False, f"Cú pháp cấu hình Squid lỗi: {error}"
-    
-    # Kiểm tra lại trạng thái Squid trước khi reconfigure
-    if not is_squid_running():
-        print("Squid stopped unexpectedly. Attempting to restart...")
-        result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            with open(SQUID_CONF, "r") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"DEBUG: Error reading Squid config: {str(e)}")
+            return False, f"Không thể đọc file cấu hình Squid: {str(e)}"
+        
+        new_lines = [line for line in lines if not line.startswith("delay_pools ")]
+        pool_count = sum(1 for line in new_lines if line.startswith("acl proxy_")) + 1
+        
+        http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
+        new_lines.insert(http_access_index, f"http_port [{ipv6}]:{port}\n")
+        
+        delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
+        new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
+        
+        new_lines[delay_pools_index + 1:delay_pools_index + 1] = [
+            f"acl proxy_{port} localport {port}\n",
+            f"delay_class {pool_count} 1\n",
+            f"delay_parameters {pool_count} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n",
+            f"delay_access {pool_count} allow proxy_{port}\n",
+            f"delay_access {pool_count} deny all\n"
+        ]
+        
+        try:
+            with open(SQUID_CONF, "w") as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            print(f"DEBUG: Error writing Squid config: {str(e)}")
+            return False, f"Không thể ghi file cấu hình Squid: {str(e)}"
+        
+        result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
             error = result.stderr.decode().strip()
-            print(f"DEBUG: Failed to restart Squid: {error}")
-            return False, f"Không thể khởi động lại Squid: {error}"
-        time.sleep(5)
+            print(f"DEBUG: Error in Squid configuration: {error}")
+            return False, f"Cú pháp cấu hình Squid lỗi: {error}"
+        
+        # Kiểm tra lại trạng thái Squid trước khi reconfigure
+        if not is_squid_running():
+            print(f"Attempt {attempt}/{max_retries}: Squid stopped unexpectedly. Attempting to restart...")
+            result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
+            if result.returncode != 0:
+                error = result.stderr.decode().strip()
+                print(f"DEBUG: Failed to restart Squid: {error}")
+                return False, f"Không thể khởi động lại Squid: {error}"
+            time.sleep(retry_delay)
+        
+        result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
+        if result.returncode != 0:
+            error = result.stderr.decode().strip()
+            print(f"DEBUG: Error reconfiguring Squid: {error}")
+            if attempt < max_retries:
+                print(f"Attempt {attempt}/{max_retries}: Retrying after {retry_delay} seconds...")
+                attempt += 1
+                time.sleep(retry_delay)
+                continue
+            return False, f"Lỗi khi reload Squid: {error}"
+        
+        # Kiểm tra cổng sau khi reconfigure
+        time.sleep(15)
+        result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess_PIPE)
+        if result.returncode != 0:
+            print(f"DEBUG: Port {port} is not open!")
+            try:
+                result = subprocess.run(f"tail -n 20 {SQUID_CACHE_LOG}", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
+                log_output = f"Log {SQUID_CACHE_LOG}:\n{result.stdout.decode().strip()}"
+            except:
+                log_output = f"Log {SQUID_CACHE_LOG}: Không tìm thấy"
+            print(f"DEBUG: Squid logs: {log_output}")
+            if attempt < max_retries:
+                print(f"Attempt {attempt}/{max_retries}: Retrying after {retry_delay} seconds...")
+                attempt += 1
+                time.sleep(retry_delay)
+                continue
+            return False, f"Cổng {port} không mở. Log Squid: {log_output}"
+        
+        print(f"DEBUG: Port {port} is open")
+        return True, "Success"
     
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        error = result.stderr.decode().strip()
-        print(f"DEBUG: Error reconfiguring Squid: {error}")
-        return False, f"Lỗi khi reload Squid: {error}"
-    
-    time.sleep(15)
-    result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        print(f"DEBUG: Port {port} is not open!")
-        try:
-            result = subprocess.run(f"tail -n 10 {SQUID_CACHE_LOG}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            log_output = f"Log {SQUID_CACHE_LOG}:\n{result.stdout.decode().strip()}"
-        except:
-            log_output = f"Log {SQUID_CACHE_LOG}: Không tìm thấy"
-        print(f"DEBUG: Squid logs: {log_output}")
-        return False, f"Cổng {port} không mở. Log Squid: {log_output}"
-    print(f"DEBUG: Port {port} is open")
-    return True, "Success"
+    return False, f"Hết số lần thử ({max_retries}) khi thêm cổng {port}"
 
 # Xóa cổng và delay pool khỏi Squid
 def remove_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
         print("Squid is not running. Attempting to start Squid service...")
-        result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run("systemctl restart squid", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
         if result.returncode != 0:
             print(f"DEBUG: Failed to start Squid: {result.stderr.decode()}")
             return False
@@ -294,7 +325,6 @@ def remove_port_and_delay_pool(ipv6, port):
     except Exception as e:
         print(f"DEBUG: Error reading Squid config: {str(e)}")
         return False
-        
     
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
     new_lines = [line for line in lines if not line.startswith(f"http_port [{ipv6}]:{port}\n") and 
@@ -313,12 +343,12 @@ def remove_port_and_delay_pool(ipv6, port):
         print(f"DEBUG: Error writing Squid config: {str(e)}")
         return False
     
-    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Error in Squid configuration: {result.stderr.decode()}")
         return False
     
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -392,7 +422,7 @@ def check_proxy(update, context):
         cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} --connect-timeout 10 -w 'HTTP_CODE:%{{http_code}}' {url}"
         print(f"DEBUG: Running curl command: {cmd}")
         try:
-            result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            result = subprocess.run(cmd, shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE, timeout=15)
             stderr = result.stderr.decode().strip()
             stdout = result.stdout.decode().strip()
             http_code = stdout.split("HTTP_CODE:")[-1] if "HTTP_CODE:" in stdout else "N/A"
@@ -471,12 +501,15 @@ def new_proxy(update, context):
         proxies.append(proxy)
         new_proxies.append(f"{ipv4}:{port}:{username}:{password}")
         used_ports.append(port)
-        result = subprocess.run(f"htpasswd -b /etc/squid/passwd {username} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(f"htpasswd -b /etc/squid/passwd {username} {password}", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
         print(f"DEBUG: htpasswd result for {username}: {result.returncode}, stderr: {result.stderr.decode()}")
         success, error_msg = add_port_and_delay_pool(ipv6, port)
         if not success:
             error_msg = error_msg[:1000] + "..." if len(error_msg) > 1000 else error_msg
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid: {error_msg}")
+            # Xóa proxy vừa tạo nếu thất bại
+            proxies.pop()
+            subprocess.run(f"htpasswd -D /etc/squid/passwd {username}", shell=True)
             return
         print(f"DEBUG: Added proxy {ipv4}:{port} with IPv6 {ipv6} and user {username}")
 
