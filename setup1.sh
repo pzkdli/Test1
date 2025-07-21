@@ -113,11 +113,11 @@ else
     exit 1
 fi
 
-# Tạo file ipv6_range.json với giá trị mặc định (sẽ được proxy.vn cập nhật)
+# Tạo file ipv6_range.json với giá trị mặc định (sẽ được proxy.py cập nhật)
 echo "Tạo file /root/ipv6_range.json..."
 cat > /root/ipv6_range.json << EOF
 {"ipv6_range": ""}
 EOF
 chmod 600 /root/ipv6_range.json
 
-echo "Cài đặt hoàn tất! Vui lòng cấu hình prefix IPv6 trong proxy.vn và chạy 'python3 proxy.vn'."
+echo "Cài đặt hoàn tất! Vui lòng chạy 'python3 proxy.py' để cấu hình prefix IPv6."
