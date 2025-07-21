@@ -9,6 +9,7 @@ import time
 import os
 import socket
 import ipaddress
+import re
 
 # Cấu hình
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
@@ -59,25 +60,41 @@ def get_vps_ip():
     print("DEBUG: Falling back to 127.0.0.1")
     return "127.0.0.1"
 
-# Nhập dải IPv6 /64
+# Nhập và lưu dải IPv6 /64
 def get_ipv6_range():
     if os.path.exists(IPV6_RANGE_PATH):
-        with open(IPV6_RANGE_PATH, "r") as f:
-            data = json.load(f)
-            return data.get("ipv6_range")
-    
-    while True:
-        ipv6_range = input("Nhập dải IPv6 /64 (ví dụ: 2001:ee0:48cc:2810::/64): ").strip()
         try:
-            network = ipaddress.IPv6Network(ipv6_range, strict=True)
-            if network.prefixlen != 64:
-                print("Dải phải là /64!")
-                continue
-            with open(IPV6_RANGE_PATH, "w") as f:
-                json.dump({"ipv6_range": ipv6_range}, f)
-            return ipv6_range
-        except ValueError as e:
-            print(f"Lỗi: {e}. Vui lòng nhập dải IPv6 /64 hợp lệ.")
+            with open(IPV6_RANGE_PATH, "r") as f:
+                data = json.load(f)
+                ipv6_range = data.get("ipv6_range")
+                if ipv6_range and re.match(r'^[0-9a-fA-F:]+/64$', ipv6_range):
+                    return ipv6_range
+        except:
+            pass
+    
+    max_attempts = 3
+    attempt = 1
+    while attempt <= max_attempts:
+        ipv6_range = input("Nhập dải IPv6 /64 (ví dụ: 2401:2420:0:102f::/64): ").strip()
+        if re.match(r'^[0-9a-fA-F:]+/64$', ipv6_range):
+            try:
+                network = ipaddress.IPv6Network(ipv6_range, strict=True)
+                if network.prefixlen == 64:
+                    with open(IPV6_RANGE_PATH, "w") as f:
+                        json.dump({"ipv6_range": ipv6_range}, f)
+                    os.chmod(IPV6_RANGE_PATH, 0o600)
+                    print(f"Đã lưu prefix IPv6: {ipv6_range}")
+                    return ipv6_range
+                else:
+                    print("Dải phải là /64!")
+            except ValueError as e:
+                print(f"Lỗi: {e}. Vui lòng nhập dải IPv6 /64 hợp lệ.")
+        else:
+            print("Lỗi: Prefix IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f::/64")
+        attempt += 1
+        print(f"Vui lòng nhập lại ({attempt}/{max_attempts}).")
+    print("Lỗi: Đã vượt quá số lần thử. Thoát.")
+    exit(1)
 
 # Tạo địa chỉ IPv6 ngẫu nhiên trong dải /64 ở dạng đầy đủ
 def generate_ipv6_from_range(ipv6_range, index):
@@ -85,11 +102,12 @@ def generate_ipv6_from_range(ipv6_range, index):
         network = ipaddress.IPv6Network(ipv6_range, strict=True)
         if network.prefixlen != 64:
             raise ValueError("Dải IPv6 phải là /64")
-        # Tạo số ngẫu nhiên cho 64 bit thấp
-        random_suffix = random.randint(1, 2**64 - 1)
-        # Kết hợp tiền tố mạng (64 bit cao) với hậu tố ngẫu nhiên (64 bit thấp)
-        ipv6_int = int(network.network_address) + random_suffix
-        ipv6 = ipaddress.IPv6Address(ipv6_int).exploded
+        # Lấy 4 phần đầu của prefix (64 bit cao)
+        prefix_base = str(network.network_address).split(':')[:4]
+        # Tạo 4 phần ngẫu nhiên (64 bit thấp, mỗi phần 16 bit)
+        random_parts = [f"{random.randint(0, 65535):04x}" for _ in range(4)]
+        # Kết hợp thành địa chỉ IPv6 đầy đủ
+        ipv6 = ':'.join(prefix_base + random_parts)
         return ipv6
     except Exception as e:
         print(f"DEBUG: Error generating IPv6: {str(e)}")
@@ -276,6 +294,7 @@ def remove_port_and_delay_pool(ipv6, port):
     except Exception as e:
         print(f"DEBUG: Error reading Squid config: {str(e)}")
         return False
+        
     
     pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
     new_lines = [line for line in lines if not line.startswith(f"http_port [{ipv6}]:{port}\n") and 
@@ -346,7 +365,7 @@ def restrict_to_admin(func):
             return
         return func(update, context)
     return wrapper
-        
+
 # Lệnh /proxy: Hiển thị số lượng proxy
 @restrict_to_admin
 def show_proxy_count(update, context):
@@ -549,7 +568,8 @@ def list_unused(update, context):
 
 # Main
 def main():
-    get_ipv6_range()
+    # Nhập và lưu prefix IPv6 trước khi chạy bot
+    ipv6_range = get_ipv6_range()
     threading.Thread(target=check_expired_periodically, daemon=True).start()
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
