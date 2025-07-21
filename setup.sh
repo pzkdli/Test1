@@ -6,13 +6,34 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Hàm kiểm tra định dạng dải IPv6 /64
+validate_ipv6_range() {
+    local range=$1
+    if [[ ! $range =~ ^[0-9a-fA-F:]+/64$ ]]; then
+        echo "Lỗi: Dải IPv6 không hợp lệ! Phải có định dạng như 2001:ee0:48cc:2810::/64"
+        return 1
+    fi
+    # Kiểm tra định dạng IPv6 bằng python
+    python3 -c "import ipaddress; ipaddress.IPv6Network('$range', strict=True)" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "Lỗi: Dải IPv6 không hợp lệ hoặc không phải /64!"
+        return 1
+    fi
+    return 0
+}
+
 # Nhập dải IPv6 từ người dùng
-echo "Nhập dải IPv6 /64 cho VPS (ví dụ: 2001:ee0:48cc:2810::/64):"
-read -r IPV6_RANGE
-if [[ ! $IPV6_RANGE =~ ^[0-9a-fA-F:]+/64$ ]]; then
-    echo "Lỗi: Dải IPv6 không hợp lệ! Phải có định dạng như 2001:ee0:48cc:2810::/64"
-    exit 1
-fi
+while true; do
+    echo "Nhập dải IPv6 /64 cho VPS (ví dụ: 2001:ee0:48cc:2810::/64):"
+    read -r IPV6_RANGE
+    if validate_ipv6_range "$IPV6_RANGE"; then
+        break
+    fi
+done
+
+# Chuẩn hóa dải IPv6
+IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.exploded)" | cut -d: -f1-4)
+IPV6_ADDRESS="${IPV6_BASE}:0000:0000:0000:0001/64"
 
 # Cập nhật hệ thống và cài đặt các gói cần thiết
 echo "Cập nhật hệ thống và cài đặt các gói..."
@@ -88,11 +109,11 @@ sysctl -w net.ipv6.conf.all.disable_ipv6=0
 echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
 
 # Gán địa chỉ IPv6 mặc định cho giao diện eth0
-echo "Gán địa chỉ IPv6 mặc định..."
+echo "Gán địa chỉ IPv6 $IPV6_ADDRESS..."
 ip -6 addr flush dev eth0
-ip -6 addr add "${IPV6_RANGE%/*}::1/64" dev eth0
-if ip -6 addr show dev eth0 | grep -q "${IPV6_RANGE%/*}"; then
-    echo "Đã gán địa chỉ IPv6 ${IPV6_RANGE%/*}::1 vào eth0."
+ip -6 addr add "$IPV6_ADDRESS" dev eth0
+if ip -6 addr show dev eth0 | grep -q "${IPV6_BASE}"; then
+    echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào eth0."
 else
     echo "Lỗi: Không thể gán địa chỉ IPv6!"
     exit 1
