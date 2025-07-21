@@ -89,7 +89,7 @@ def generate_ipv6_from_range(ipv6_range, index):
 
 # Lấy IPv6 chưa sử dụng
 def get_unused_ipv6(proxies, ipv6_range):
-    used_ipv6 = {proxy["ipv6"] for proxy in proxies}
+    used_ipv6 = {proxy.get("ipv6", proxy.get("ip")) for proxy in proxies if proxy.get("ipv6") or proxy.get("ip")}  # Hỗ trợ cả "ipv6" và "ip"
     index = len(used_ipv6) + 1  # Bắt đầu từ 1 để tránh ::0
     for _ in range(100):  # Thử tối đa 100 địa chỉ
         ipv6 = generate_ipv6_from_range(ipv6_range, index)
@@ -232,7 +232,7 @@ def delete_expired():
     for proxy in proxies:
         if proxy["first_connect"] and datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=proxy["lifetime"]) < datetime.now():
             subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
-            remove_port_and_delay_pool(proxy["ipv6"], proxy["port"])
+            remove_port_and_delay_pool(proxy.get("ipv6", proxy.get("ip")), proxy["port"])
         else:
             updated_proxies.append(proxy)
     save_proxies(updated_proxies)
@@ -398,7 +398,7 @@ def delete_proxy(update, context):
     proxy_to_delete = next(p for p in proxies if p["ipv4"] == ip and p["port"] == port)
     save_proxies(updated_proxies)
     subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
-    remove_port_and_delay_pool(proxy_to_delete["ipv6"], port)
+    remove_port_and_delay_pool(proxy_to_delete.get("ipv6", proxy_to_delete.get("ip")), port)
     update.message.reply_text(f"Đã xóa proxy {ip}:{port}")
 
 # Lệnh /xoaall: Xóa tất cả proxy
@@ -407,7 +407,7 @@ def delete_all(update, context):
     proxies = load_proxies()
     for proxy in proxies:
         subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516", shell=True)
-        remove_port_and_delay_pool(proxy["ipv6"], proxy["port"])
+        remove_port_and_delay_pool(proxy.get("ipv6", proxy.get("ip")), proxy["port"])
     save_proxies([])
     update.message.reply_text("Đã xóa tất cả proxy!")
 
@@ -439,7 +439,7 @@ def list_used(update, context):
     result = [f"Page {page}/{total_pages}"]
     for proxy in used_proxies[start:end]:
         days_left = (datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=proxy["lifetime"]) - datetime.now()).days
-        result.append(f"{proxy['ipv4']}:{proxy['port']}:{proxy['user']}:{proxy['pass']} (IPv6: {proxy['ipv6']}, Còn {days_left} ngày, 35 MB/s)")
+        result.append(f"{proxy['ipv4']}:{proxy['port']}:{proxy['user']}:{proxy['pass']} (IPv6: {proxy.get('ipv6', proxy.get('ip'))}, Còn {days_left} ngày, 35 MB/s)")
     update.message.reply_text("\n".join(result))
 
 # Lệnh /list2: Liệt kê proxy chưa sử dụng
@@ -450,7 +450,7 @@ def list_unused(update, context):
     if not unused_proxies:
         update.message.reply_text("Không có proxy nào chưa sử dụng!")
         return
-    result = [f"{p['ipv4']}:{p['port']}:{p['user']}:{p['pass']} (IPv6: {p['ipv6']}, {p['lifetime']} ngày, 35 MB/s)" for p in unused_proxies]
+    result = [f"{p['ipv4']}:{p['port']}:{p['user']}:{p['pass']} (IPv6: {p.get('ipv6', p.get('ip'))}, {p['lifetime']} ngày, 35 MB/s)" for p in unused_proxies]
     update.message.reply_text("\n".join(result))
 
 # Main
