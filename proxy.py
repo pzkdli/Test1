@@ -127,7 +127,7 @@ def add_port_and_delay_pool(port):
         return False
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -157,13 +157,13 @@ def remove_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Kiểm tra cú pháp file cấu hình
-    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error in Squid configuration: {result.stderr.decode()}")
         return False
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -211,6 +211,30 @@ def restrict_to_admin(func):
         return func(update, context)
     return wrapper
 
+# Lệnh /check: Kiểm tra proxy qua https://www.myip.com/
+@restrict_to_admin
+def check_proxy(update, context):
+    try:
+        proxy = context.args[0]
+        ip, port, user, password = proxy.split(":")
+        port = int(port)
+    except (IndexError, ValueError):
+        update.message.reply_text("Vui lòng nhập proxy theo định dạng: /check <IPv4:port:user:pass>")
+        return
+
+    # Kiểm tra proxy bằng curl
+    cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} https://www.myip.com/"
+    try:
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        if result.returncode == 0:
+            update.message.reply_text(f"Proxy {ip}:{port} hoạt động! Kết quả từ myip.com:\n{result.stdout.decode()[:200]}...")
+        else:
+            update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: {result.stderr.decode()}")
+    except subprocess.TimeoutExpired:
+        update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: Connection timeout")
+    except Exception as e:
+        update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: {str(e)}")
+
 # Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
 @restrict_to_admin
 def new_proxy(update, context):
@@ -230,7 +254,7 @@ def new_proxy(update, context):
         return
 
     vps_ip = get_vps_ip()
-    print(f"DEBUG: VPS IP = {vps_ip}")  # Debug IP
+    print(f"DEBUG: VPS IP = {vps_ip}")
     used_ports = get_used_ports()
     new_proxies = []
 
@@ -353,6 +377,7 @@ def main():
     dp.add_handler(CommandHandler("xoaall", delete_all))
     dp.add_handler(CommandHandler("list", list_used, pass_args=True))
     dp.add_handler(CommandHandler("list2", list_unused))
+    dp.add_handler(CommandHandler("check", check_proxy))
     updater.start_polling()
     updater.idle()
 
