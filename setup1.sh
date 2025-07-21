@@ -6,14 +6,15 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Kiểm tra và cài đặt Python3.8
-if ! command -v python3.8 &> /dev/null; then
-    echo "Cài đặt Python3.8..."
-    yum install -y python38 python38-pip || apt-get install -y python3.8 python3-pip
+# Kiểm tra và cài đặt Python3
+if ! command -v python3 &> /dev/null; then
+    echo "Cài đặt Python3..."
+    yum install -y python3 python3-pip || apt-get install -y python3 python3-pip
 fi
-# Cài đặt thư viện Python
-echo "Cài đặt thư viện Python..."
-python3.8 -m pip install python-telegram-bot==13.7 ipaddress
+
+# Cài đặt các thư viện phát triển cần thiết
+echo "Cài đặt các thư viện phát triển..."
+yum install -y libffi-devel openssl-devel || apt-get install -y libffi-dev libssl-dev
 
 # Cập nhật hệ thống và cài đặt các gói cần thiết
 echo "Cập nhật hệ thống và cài đặt các gói..."
@@ -26,9 +27,9 @@ if ! command -v squid &> /dev/null; then
     exit 1
 fi
 
-# Cài đặt thư viện Python
+# Cài đặt thư viện Python (phiên bản cụ thể để tương thích Python 3.6)
 echo "Cài đặt thư viện Python..."
-pip3 install python-telegram-bot ipaddress
+pip3 install python-telegram-bot==13.7 ipaddress
 
 # Tạo file cấu hình Squid
 echo "Tạo file cấu hình Squid tại /etc/squid/squid.conf..."
