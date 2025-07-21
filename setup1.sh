@@ -8,78 +8,51 @@ fi
 
 # Kiểm tra Python3 có sẵn không
 if ! command -v python3 &> /dev/null; then
-    echo "Lỗi: Python3 không được cài đặt! Cài đặt Python3..."
+    echo "Cài đặt Python3..."
     yum install -y python3 python3-pip || apt-get install -y python3 python3-pip
 fi
 
-# Hàm kiểm tra định dạng IPv6
-validate_ipv6() {
+# Hàm kiểm tra định dạng prefix IPv6
+validate_ipv6_prefix() {
     local input=$1
-    # Kiểm tra định dạng IPv6 với /64
-    if [[ ! $input =~ ^[0-9a-fA-F:]{2,39}/64$ ]]; then
-        echo "Lỗi: Địa chỉ IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f:0000:0000:0000:0001/64"
-        return 1
-    fi
-    # Kiểm tra số phần (8 phần hoặc có ::)
-    local parts=$(echo "$input" | cut -d'/' -f1 | tr ':' '\n' | wc -l)
-    if [[ "$input" != *"::"* && $parts -ne 8 ]]; then
-        echo "Lỗi: Địa chỉ IPv6 phải có 8 phần hoặc sử dụng '::'!"
+    # Kiểm tra định dạng prefix IPv6 với /64
+    if [[ ! $input =~ ^[0-9a-fA-F:]+/64$ ]]; then
+        echo "Lỗi: Prefix IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f::/64"
         return 1
     fi
     return 0
 }
 
-# Hàm lấy prefix /64 từ địa chỉ IPv6
+# Hàm nhập thủ công prefix IPv6
 get_ipv6_prefix() {
-    local input=$1
-    # Kiểm tra xem Python có xử lý được không
-    prefix=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$input', strict=True).compressed)" 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$prefix" ]; then
-        echo "Lỗi: Không thể lấy prefix IPv6 từ '$input'!"
-        return 1
-    fi
-    echo "$prefix"
-    return 0
-}
-
-# Hàm nhập thủ công dải IPv6
-get_ipv6_range() {
-    echo "Vui lòng nhập địa chỉ IPv6 đầy đủ (ví dụ: 2401:2420:0:102f:0000:0000:0000:0001/64):"
+    echo "Vui lòng nhập prefix IPv6 (ví dụ: 2401:2420:0:102f::/64):"
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         read -r ipv6_input
-        if validate_ipv6 "$ipv6_input"; then
-            ipv6_range=$(get_ipv6_prefix "$ipv6_input")
-            if [ $? -eq 0 ] && [ -n "$ipv6_range" ]; then
-                echo "Đã tách prefix IPv6: $ipv6_range"
-                echo "$ipv6_range"
-                return 0
-            fi
+        if validate_ipv6_prefix "$ipv6_input"; then
+            echo "Prefix IPv6 hợp lệ: $ipv6_input"
+            echo "$ipv6_input"
+            return 0
         fi
-        echo "Lỗi: Địa chỉ IPv6 không hợp lệ! Vui lòng nhập lại ($attempt/$max_attempts)."
+        echo "Lỗi: Prefix IPv6 không hợp lệ! Vui lòng nhập lại ($attempt/$max_attempts)."
         attempt=$((attempt + 1))
         if [ $attempt -gt $max_attempts ]; then
-            echo "Lỗi: Đã vượt quá số lần thử. Vui lòng kiểm tra lại địa chỉ IPv6."
+            echo "Lỗi: Đã vượt quá số lần thử. Vui lòng kiểm tra lại prefix IPv6."
             return 1
         fi
     done
 }
 
-# Nhập thủ công dải IPv6
-IPV6_RANGE=$(get_ipv6_range)
+# Nhập thủ công prefix IPv6
+IPV6_RANGE=$(get_ipv6_prefix)
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể xác định dải IPv6!"
+    echo "Lỗi: Không thể xác định prefix IPv6!"
     exit 1
 fi
 
 # Tạo địa chỉ IPv6 hợp lệ (thêm :1 vào cuối)
-IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.compressed)" 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$IPV6_BASE" ]; then
-    echo "Lỗi: Không thể tạo địa chỉ IPv6 cơ bản từ '$IPV6_RANGE'!"
-    exit 1
-fi
-IPV6_ADDRESS="${IPV6_BASE}:1/64"
+IPV6_ADDRESS="${IPV6_RANGE%:*/64}:1/64"
 
 # Cập nhật hệ thống và cài đặt các gói cần thiết
 echo "Cập nhật hệ thống và cài đặt các gói..."
@@ -157,10 +130,10 @@ if [ -z "$interface" ]; then
 fi
 ip -6 addr flush dev "$interface"
 ip -6 addr add "$IPV6_ADDRESS" dev "$interface"
-if ip -6 addr show dev "$interface" | grep -q "${IPV6_BASE}"; then
+if ip -6 addr show dev "$interface" | grep -q "${IPV6_ADDRESS%:*/64}"; then
     echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào $interface."
 else
-    echo "Lỗi: Không thể gán địa chỉ IPv6! Vui lòng kiểm tra dải IPv6 với nhà cung cấp VPS."
+    echo "Lỗi: Không thể gán địa chỉ IPv6! Vui lòng kiểm tra prefix IPv6 với nhà cung cấp VPS."
     exit 1
 fi
 
