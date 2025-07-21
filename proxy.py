@@ -498,8 +498,19 @@ def main():
     
     # Khởi động thread kiểm tra hết hạn
     threading.Thread(target=check_expired_periodically, daemon=True).start()
-    
-    # Khởi động bot Telegram
+        # Khởi động bot Telegram
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("new", new_proxy))
+    dp.add_handler(CommandHandler("xoa", delete_proxy))
+    dp.add_handler(CommandHandler("xoaall", delete_all))
+    dp.add_handler(CommandHandler("list", list_used, pass_args=True))
+    dp.add_handler(CommandHandler("list2", list_unused))
+    dp.add_handler(CommandHandler("check", check_proxy))
+    dp.add_handler(CommandHandler("proxy", show_proxy_count))
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
+    
