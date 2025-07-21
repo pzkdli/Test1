@@ -15,6 +15,8 @@ BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
 ADMIN_ID = 7550813603
 SQUID_LOG = "/var/log/squid/access.log"
 DB_PATH = "/root/proxy.db"
+SQUID_CONF = "/etc/squid/squid.conf"
+BANDWIDTH_LIMIT_KBPS = 280000  # 35 MB/s = 280000 kbps
 
 # Kết nối cơ sở dữ liệu
 engine = create_engine(f'sqlite:///{DB_PATH}')
@@ -49,6 +51,47 @@ def get_used_ports():
     session.close()
     return used_ports
 
+# Thêm cấu hình delay pool cho cổng
+def add_delay_pool(port):
+    with open(SQUID_CONF, "r") as f:
+        lines = f.readlines()
+    
+    # Xóa dòng delay_pools cũ và thêm mới
+    new_lines = [line for line in lines if not line.startswith("delay_pools ")]
+    pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
+    new_lines.insert(new_lines.index("delay_pools 0\n") + 1, f"delay_pools {pool_count + 1}\n")
+    new_lines.append(f"acl proxy_{port} localport {port}\n")
+    new_lines.append(f"delay_class {pool_count + 1} 1\n")
+    new_lines.append(f"delay_parameters {pool_count + 1} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n")
+    new_lines.append(f"delay_access {pool_count + 1} allow proxy_{port}\n")
+    new_lines.append(f"delay_access {pool_count + 1} deny all\n")
+    
+    with open(SQUID_CONF, "w") as f:
+        f.writelines(new_lines)
+    
+    # Tải lại cấu hình Squid
+    subprocess.run("squid -k reconfigure", shell=True)
+
+# Xóa cấu hình delay pool cho cổng
+def remove_delay_pool(port):
+    with open(SQUID_CONF, "r") as f:
+        lines = f.readlines()
+    
+    # Xóa các dòng liên quan đến delay pool của cổng
+    pool_count = sum(1 for line in lines if line.startswith("acl proxy_"))
+    new_lines = [line for line in lines if not line.startswith(f"acl proxy_{port}\n") and 
+                 not line.startswith(f"delay_class {pool_count} ") and 
+                 not line.startswith(f"delay_parameters {pool_count} ") and 
+                 not line.startswith(f"delay_access {pool_count} ")]
+    new_lines = [line for line in new_lines if not line.startswith("delay_pools ")]
+    new_lines.insert(new_lines.index("delay_pools 0\n") + 1, f"delay_pools {pool_count - 1}\n")
+    
+    with open(SQUID_CONF, "w") as f:
+        f.writelines(new_lines)
+    
+    # Tải lại cấu hình Squid
+    subprocess.run("squid -k reconfigure", shell=True)
+
 # Kiểm tra log Squid để cập nhật thời gian kết nối đầu tiên
 def update_first_connect():
     session = Session()
@@ -73,6 +116,7 @@ def delete_expired():
         if datetime.now() > proxy.first_connect + timedelta(days=30):
             session.delete(proxy)
             subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy.port}", shell=True)
+            remove_delay_pool(proxy.port)
     session.commit()
     session.close()
 
@@ -120,10 +164,12 @@ def new_proxy(update, context):
         used_ports.append(port)
         # Thêm user/pass vào Squid
         subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True)
+        # Thêm delay pool
+        add_delay_pool(port)
 
     session.commit()
     session.close()
-    update.message.reply_text(f"Đã tạo {count} proxy:\n" + "\n".join(new_proxies))
+    update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s):\n" + "\n".join(new_proxies))
 
 # Lệnh /xoa: Xóa proxy riêng lẻ
 @restrict_to_admin
@@ -142,6 +188,7 @@ def delete_proxy(update, context):
         session.delete(proxy)
         session.commit()
         subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{port}", shell=True)
+        remove_delay_pool(port)
         update.message.reply_text(f"Đã xóa proxy {ip}:{port}")
     else:
         update.message.reply_text("Proxy không tồn tại!")
@@ -155,6 +202,7 @@ def delete_all(update, context):
     for proxy in proxies:
         session.delete(proxy)
         subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy.port}", shell=True)
+        remove_delay_pool(proxy.port)
     session.commit()
     session.close()
     update.message.reply_text("Đã xóa tất cả proxy!")
@@ -188,7 +236,7 @@ def list_used(update, context):
     result = [f"Page {page}/{total_pages}"]
     for proxy in proxies[start:end]:
         days_left = (proxy.first_connect + timedelta(days=30) - datetime.now()).days
-        result.append(f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_} (Còn {days_left} ngày)")
+        result.append(f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_} (Còn {days_left} ngày, 35 MB/s)")
     update.message.reply_text("\n".join(result))
 
 # Lệnh /list2: Liệt kê proxy chưa sử dụng
@@ -200,7 +248,7 @@ def list_unused(update, context):
     if not proxies:
         update.message.reply_text("Không có proxy nào chưa sử dụng!")
         return
-    result = [f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_}" for proxy in proxies]
+    result = [f"{proxy.ip}:{proxy.port}:{proxy.user}:{proxy.pass_} (35 MB/s)" for proxy in proxies]
     update.message.reply_text("\n".join(result))
 
 # Main
