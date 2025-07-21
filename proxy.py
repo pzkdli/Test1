@@ -47,8 +47,17 @@ def get_used_ports():
     proxies = load_proxies()
     return [proxy["port"] for proxy in proxies]
 
+# Kiểm tra trạng thái Squid
+def is_squid_running():
+    result = subprocess.run("systemctl is-active squid", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.stdout.decode().strip() == "active"
+
 # Thêm cổng và delay pool vào Squid
 def add_port_and_delay_pool(port):
+    if not is_squid_running():
+        print("Squid is not running. Please start Squid service.")
+        return False
+
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
@@ -75,12 +84,18 @@ def add_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, capture_output=True, text=True)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error reconfiguring Squid: {result.stderr}")
+        print(f"Error reconfiguring Squid: {result.stderr.decode()}")
+        return False
+    return True
 
 # Xóa cổng và delay pool khỏi Squid
 def remove_port_and_delay_pool(port):
+    if not is_squid_running():
+        print("Squid is not running. Please start Squid service.")
+        return False
+
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
     
@@ -99,9 +114,11 @@ def remove_port_and_delay_pool(port):
         f.writelines(new_lines)
     
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, capture_output=True, text=True)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
-        print(f"Error reconfiguring Squid: {result.stderr}")
+        print(f"Error reconfiguring Squid: {result.stderr.decode()}")
+        return False
+    return True
 
 # Kiểm tra log Squid để cập nhật thời gian kết nối đầu tiên
 def update_first_connect():
@@ -187,9 +204,15 @@ def new_proxy(update, context):
         new_proxies.append(f"{vps_ip}:{port}:vtoan5516:{password}")
         used_ports.append(port)
         # Thêm user/pass vào Squid
-        subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True)
+        result = subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode == 0:
+            print(f"Adding password for user vtoan5516_{port}")
+        else:
+            print(f"Error adding password for vtoan5516_{port}: {result.stderr.decode()}")
         # Thêm cổng và delay pool
-        add_port_and_delay_pool(port)
+        if not add_port_and_delay_pool(port):
+            update.message.reply_text(f"Không thể thêm cổng {port} vào Squid. Vui lòng kiểm tra dịch vụ Squid!")
+            return
 
     save_proxies(proxies)
     update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s):\n" + "\n".join(new_proxies))
