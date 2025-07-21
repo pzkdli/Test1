@@ -82,10 +82,13 @@ def get_ipv6_range():
 # Tạo địa chỉ IPv6 ngẫu nhiên trong dải /64 ở dạng đầy đủ
 def generate_ipv6_from_range(ipv6_range, index):
     try:
-        network = ipaddress.IPv6Network(ipv6_range)
-        prefix = int(network.network_address) & (2**128 - 2**64)
+        network = ipaddress.IPv6Network(ipv6_range, strict=True)
+        if network.prefixlen != 64:
+            raise ValueError("Dải IPv6 phải là /64")
+        # Tạo số ngẫu nhiên cho 64 bit thấp
         random_suffix = random.randint(1, 2**64 - 1)
-        ipv6_int = prefix | random_suffix
+        # Kết hợp tiền tố mạng (64 bit cao) với hậu tố ngẫu nhiên (64 bit thấp)
+        ipv6_int = int(network.network_address) + random_suffix
         ipv6 = ipaddress.IPv6Address(ipv6_int).exploded
         return ipv6
     except Exception as e:
@@ -343,7 +346,7 @@ def restrict_to_admin(func):
             return
         return func(update, context)
     return wrapper
-
+        
 # Lệnh /proxy: Hiển thị số lượng proxy
 @restrict_to_admin
 def show_proxy_count(update, context):
