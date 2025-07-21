@@ -27,9 +27,24 @@ if ! command -v squid &> /dev/null; then
     exit 1
 fi
 
-# Cài đặt thư viện Python (phiên bản cụ thể để tương thích Python 3.6)
-echo "Cài đặt thư viện Python..."
-pip3 install python-telegram-bot==13.7 ipaddress
+# Gỡ cài đặt python-telegram-bot hiện tại để tránh xung đột
+echo "Gỡ cài đặt python-telegram-bot hiện tại (nếu có)..."
+pip3 uninstall -y python-telegram-bot || true
+
+# Xóa thư mục cài đặt cũ trong /usr/local/lib/python3.6/site-packages
+echo "Xóa thư mục python-telegram-bot cũ để tránh xung đột..."
+rm -rf /usr/local/lib/python3.6/site-packages/telegram*
+rm -rf /usr/local/lib/python3.6/site-packages/python_telegram_bot*
+
+# Cài đặt thư viện Python với phiên bản cụ thể
+echo "Cài đặt thư viện Python (python-telegram-bot==13.7)..."
+pip3 install --no-cache-dir python-telegram-bot==13.7 ipaddress
+
+# Kiểm tra cài đặt python-telegram-bot
+if ! pip3 show python-telegram-bot | grep -q "Version: 13.7"; then
+    echo "Lỗi: Không thể cài đặt python-telegram-bot phiên bản 13.7!"
+    exit 1
+fi
 
 # Tạo file cấu hình Squid
 echo "Tạo file cấu hình Squid tại /etc/squid/squid.conf..."
@@ -117,7 +132,7 @@ else
     exit 1
 fi
 
-# Tạo file ipv6_range.json với giá trị mặc định (sẽ được proxy.py cập nhật)
+# Tạo file ipv6_range.json với giá trị mặc định
 echo "Tạo file /root/ipv6_range.json..."
 cat > /root/ipv6_range.json << EOF
 {"ipv6_range": ""}
