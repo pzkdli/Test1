@@ -2,7 +2,7 @@
 
 # Kiểm tra quyền root
 if [ "$EUID" -ne 0 ]; then
-    echo "Vui lòng chạy script này với quyền root!"
+    echo "Lỗi: Vui lòng chạy script này với quyền root!"
     exit 1
 fi
 
@@ -15,24 +15,40 @@ validate_ipv6() {
     fi
     python3 -c "import ipaddress; ipaddress.IPv6Network('$input', strict=True)" 2>/dev/null
     if [ $? -ne 0 ]; then
-        echo "Lỗi: Địa chỉ hoặc dải IPv6 không hợp lệ!"
+        echo "Lỗi: Địa chỉ hoặc dải IPv6 không hợp lệ hoặc không phải /64!"
         return 1
     fi
     return 0
 }
 
-# Hàm lấy prefix /64 từ địa chỉ IPv6
+# Hàm lấy prefix /64 từ địa chỉ hoặc dải IPv6
 get_ipv6_prefix() {
     local input=$1
-    python3 -c "import ipaddress; print(ipaddress.IPv6Network('$input', strict=True).compressed)" 2>/dev/null
-    if [ $? -ne 0 ]; then
+    prefix=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$input', strict=True).compressed)" 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$prefix" ]; then
         echo ""
         return 1
     fi
+    echo "$prefix"
     return 0
 }
 
-# Tự động phát hiện dải IPv6 /64 từ giao diện mạng
+# Hàm kiểm tra IPv6 có được kích hoạt không
+check_ipv6_enabled() {
+    if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
+        echo "Lỗi: IPv6 bị vô hiệu hóa trên hệ thống!"
+        echo "Đang kích hoạt IPv6..."
+        sysctl -w net.ipv6.conf.all.disable_ipv6=0
+        echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
+        if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
+            echo "Lỗi: Không thể kích hoạt IPv6! Vui lòng kiểm tra cấu hình hệ thống."
+            exit 1
+        fi
+    fi
+    echo "IPv6 đã được kích hoạt."
+}
+
+# Hàm tự động phát hiện dải IPv6 /64 từ giao diện mạng
 get_ipv6_range() {
     # Tìm giao diện mạng chính (loại trừ lo)
     interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
@@ -52,17 +68,22 @@ get_ipv6_range() {
         fi
     fi
     # Nếu không tìm thấy, yêu cầu nhập thủ công
+    echo "Không tìm thấy dải IPv6 /64 trên giao diện $interface."
+    echo "Vui lòng kiểm tra với nhà cung cấp VPS để lấy dải IPv6 /64 (ví dụ: 2401:2420:0:102f::/64)."
     while true; do
-        echo "Không tìm thấy dải IPv6 /64 trên giao diện $interface."
-        echo "Vui lòng nhập địa chỉ IPv6 đầy đủ (ví dụ: 2401:2420:0:102f:0000:0000:0000:0001/64):"
+        echo "Nhập địa chỉ IPv6 đầy đủ (ví dụ: 2401:2420:0:102f:0000:0000:0000:0001/64):"
         read -r ipv6_input
         ipv6_range=$(get_ipv6_prefix "$ipv6_input")
         if [ -n "$ipv6_range" ] && validate_ipv6 "$ipv6_range"; then
+            echo "Đã tách prefix IPv6: $ipv6_range"
             echo "$ipv6_range"
             return 0
         fi
     done
 }
+
+# Kiểm tra IPv6 có được kích hoạt không
+check_ipv6_enabled
 
 # Tự động phát hiện hoặc nhập dải IPv6
 IPV6_RANGE=$(get_ipv6_range)
@@ -142,11 +163,6 @@ else
     exit 1
 fi
 
-# Kích hoạt IPv6
-echo "Kích hoạt IPv6..."
-sysctl -w net.ipv6.conf.all.disable_ipv6=0
-echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
-
 # Gán địa chỉ IPv6 mặc định cho giao diện mạng
 echo "Gán địa chỉ IPv6 $IPV6_ADDRESS..."
 interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
@@ -159,7 +175,7 @@ ip -6 addr add "$IPV6_ADDRESS" dev "$interface"
 if ip -6 addr show dev "$interface" | grep -q "${IPV6_BASE}"; then
     echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào $interface."
 else
-    echo "Lỗi: Không thể gán địa chỉ IPv6!"
+    echo "Lỗi: Không thể gán địa chỉ IPv6! Vui lòng kiểm tra dải IPv6 với nhà cung cấp VPS."
     exit 1
 fi
 
