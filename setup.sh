@@ -10,10 +10,9 @@ fi
 validate_ipv6_range() {
     local range=$1
     if [[ ! $range =~ ^[0-9a-fA-F:]+/[0-9]+$ ]]; then
-        echo "Lỗi: Dải IPv6 không hợp lệ! Phải có định dạng như 2001:ee0:48cc:2810::/64"
+        echo "Lỗi: Dải IPv6 không hợp lệ! Phải có định dạng như 2401:2420:0:102f::/64"
         return 1
     fi
-    # Kiểm tra định dạng IPv6 bằng python
     python3 -c "import ipaddress; ipaddress.IPv6Network('$range', strict=True)" 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "Lỗi: Dải IPv6 không hợp lệ hoặc không phải /64!"
@@ -22,18 +21,37 @@ validate_ipv6_range() {
     return 0
 }
 
-# Nhập dải IPv6 từ người dùng
-while true; do
-    echo "Nhập dải IPv6 /64 cho VPS (ví dụ: 2001:ee0:48cc:2810::/64):"
-    read -r IPV6_RANGE
-    if validate_ipv6_range "$IPV6_RANGE"; then
-        break
+# Tự động phát hiện dải IPv6 /64 từ giao diện mạng
+get_ipv6_range() {
+    # Tìm giao diện mạng chính (loại trừ lo)
+    interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
+    if [ -z "$interface" ]; then
+        echo "Lỗi: Không tìm thấy giao diện mạng!"
+        exit 1
     fi
-done
+    # Lấy dải IPv6 /64 từ giao diện
+    ipv6_range=$(ip -6 addr show dev "$interface" | grep inet6 | grep '/64' | awk '{print $2}' | head -n 1 | sed 's/\/64$//')
+    if [ -z "$ipv6_range" ]; then
+        echo "Lỗi: Không tìm thấy dải IPv6 /64 trên giao diện $interface!"
+        echo "Vui lòng cấu hình dải IPv6 /64 trên giao diện mạng trước (ví dụ: 2401:2420:0:102f::/64)."
+        exit 1
+    fi
+    # Chuẩn hóa dải IPv6
+    ipv6_range=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$ipv6_range/64', strict=True).compressed)")
+    if validate_ipv6_range "$ipv6_range/64"; then
+        echo "Đã phát hiện dải IPv6: $ipv6_range/64"
+        echo "$ipv6_range/64"
+    else
+        echo "Lỗi: Dải IPv6 $ipv6_range/64 không hợp lệ!"
+        exit 1
+    fi
+}
 
-# Chuẩn hóa dải IPv6
-IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.exploded)")
-IPV6_ADDRESS="${IPV6_BASE%:*}:0000:0000:0000:0001/64"
+# Tự động phát hiện dải IPv6
+IPV6_RANGE=$(get_ipv6_range)
+# Tạo địa chỉ IPv6 hợp lệ (thêm :1 vào cuối)
+IPV6_BASE=$(python3 -c "import ipaddress; print(ipaddress.IPv6Network('$IPV6_RANGE', strict=True).network_address.compressed)")
+IPV6_ADDRESS="$IPV6_BASE:1/64"
 
 # Cập nhật hệ thống và cài đặt các gói cần thiết
 echo "Cập nhật hệ thống và cài đặt các gói..."
@@ -110,10 +128,11 @@ echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
 
 # Gán địa chỉ IPv6 mặc định cho giao diện eth0
 echo "Gán địa chỉ IPv6 $IPV6_ADDRESS..."
-ip -6 addr flush dev eth0
-ip -6 addr add "$IPV6_ADDRESS" dev eth0
-if ip -6 addr show dev eth0 | grep -q "${IPV6_BASE%:*}"; then
-    echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào eth0."
+interface=$(ip link | grep '^[0-9]' | grep -v lo | awk -F': ' '{print $2}' | head -n 1)
+ip -6 addr flush dev "$interface"
+ip -6 addr add "$IPV6_ADDRESS" dev "$interface"
+if ip -6 addr show dev "$interface" | grep -q "${IPV6_BASE}"; then
+    echo "Đã gán địa chỉ IPv6 $IPV6_ADDRESS vào $interface."
 else
     echo "Lỗi: Không thể gán địa chỉ IPv6!"
     exit 1
@@ -161,7 +180,7 @@ else
     exit 1
 fi
 
-# Tạo file ipv6_range.json với dải IPv6 tùy chỉnh
+# Tạo file ipv6_range.json với dải IPv6 tự động phát hiện
 echo "Tạo file /root/ipv6_range.json..."
 cat > /root/ipv6_range.json << EOF
 {"ipv6_range": "$IPV6_RANGE"}
