@@ -211,7 +211,7 @@ def restrict_to_admin(func):
         return func(update, context)
     return wrapper
 
-# Lệnh /check: Kiểm tra proxy qua https://www.myip.com/
+# Lệnh /check: Kiểm tra proxy qua https://www.myip.com/ và https://ipconfig.io/
 @restrict_to_admin
 def check_proxy(update, context):
     try:
@@ -222,18 +222,26 @@ def check_proxy(update, context):
         update.message.reply_text("Vui lòng nhập proxy theo định dạng: /check <IPv4:port:user:pass>")
         return
 
-    # Kiểm tra proxy bằng curl
-    cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} https://www.myip.com/"
-    try:
-        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-        if result.returncode == 0:
-            update.message.reply_text(f"Proxy {ip}:{port} hoạt động! Kết quả từ myip.com:\n{result.stdout.decode()[:200]}...")
-        else:
-            update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: {result.stderr.decode()}")
-    except subprocess.TimeoutExpired:
-        update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: Connection timeout")
-    except Exception as e:
-        update.message.reply_text(f"Proxy {ip}:{port} không hoạt động! Lỗi: {str(e)}")
+    # Danh sách các URL để kiểm tra
+    test_urls = ["https://www.myip.com/", "https://ipconfig.io/"]
+    results = []
+
+    for url in test_urls:
+        cmd = f"curl -s --proxy http://{user}:{password}@{ip}:{port} --connect-timeout 10 {url}"
+        try:
+            result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+            if result.returncode == 0:
+                output = result.stdout.decode()
+                # Giới hạn độ dài đầu ra để tránh tin nhắn Telegram quá dài
+                results.append(f"Proxy {ip}:{port} hoạt động với {url}! Kết quả:\n{output[:200]}...")
+            else:
+                results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: {result.stderr.decode()}")
+        except subprocess.TimeoutExpired:
+            results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: Connection timeout")
+        except Exception as e:
+            results.append(f"Proxy {ip}:{port} không hoạt động với {url}! Lỗi: {str(e)}")
+
+    update.message.reply_text("\n".join(results))
 
 # Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
 @restrict_to_admin
