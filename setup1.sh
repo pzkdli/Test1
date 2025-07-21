@@ -66,24 +66,6 @@ get_ipv6_range() {
     done
 }
 
-# Kiểm tra IPv6 có được kích hoạt không
-check_ipv6_enabled() {
-    if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
-        echo "Lỗi: IPv6 bị vô hiệu hóa trên hệ thống!"
-        echo "Đang kích hoạt IPv6..."
-        sysctl -w net.ipv6.conf.all.disable_ipv6=0
-        echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.conf
-        if sysctl -n net.ipv6.conf.all.disable_ipv6 | grep -q "1"; then
-            echo "Lỗi: Không thể kích hoạt IPv6! Vui lòng kiểm tra cấu hình hệ thống."
-            exit 1
-        fi
-    fi
-    echo "IPv6 đã được kích hoạt."
-}
-
-# Kiểm tra IPv6 có được kích hoạt không
-check_ipv6_enabled
-
 # Nhập thủ công dải IPv6
 IPV6_RANGE=$(get_ipv6_range)
 if [ $? -ne 0 ]; then
