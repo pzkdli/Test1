@@ -134,12 +134,12 @@ def update_first_connect():
     except FileNotFoundError:
         pass  # Bỏ qua nếu log chưa tồn tại
 
-# Xóa proxy hết hạn (30 ngày kể từ lần kết nối đầu tiên)
+# Xóa proxy hết hạn (dựa trên ngày hết hạn tùy chỉnh)
 def delete_expired():
     proxies = load_proxies()
     updated_proxies = []
     for proxy in proxies:
-        if proxy["first_connect"] and datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=30) < datetime.now():
+        if proxy["first_connect"] and datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=proxy["lifetime"]) < datetime.now():
             subprocess.run(f"htpasswd -D /etc/squid/passwd vtoan5516_{proxy['port']}", shell=True)
             remove_port_and_delay_pool(proxy["port"])
         else:
@@ -162,16 +162,17 @@ def restrict_to_admin(func):
         return func(update, context)
     return wrapper
 
-# Lệnh /new: Tạo proxy mới
+# Lệnh /new: Tạo proxy mới với thời gian sống tùy chỉnh
 @restrict_to_admin
 def new_proxy(update, context):
     try:
         count = int(context.args[0])
-        if count <= 0:
-            update.message.reply_text("Số lượng proxy phải lớn hơn 0!")
+        lifetime = int(context.args[1])  # Số ngày sống của proxy
+        if count <= 0 or lifetime <= 0:
+            update.message.reply_text("Số lượng proxy và số ngày phải lớn hơn 0!")
             return
     except (IndexError, ValueError):
-        update.message.reply_text("Vui lòng nhập số lượng proxy: /new <số lượng>")
+        update.message.reply_text("Vui lòng nhập số lượng proxy và số ngày: /new <số lượng> <số ngày>")
         return
 
     proxies = load_proxies()
@@ -198,7 +199,8 @@ def new_proxy(update, context):
             "port": port,
             "user": "vtoan5516",
             "pass": password,
-            "first_connect": None
+            "first_connect": None,
+            "lifetime": lifetime  # Lưu số ngày sống
         }
         proxies.append(proxy)
         new_proxies.append(f"{vps_ip}:{port}:vtoan5516:{password}")
@@ -215,7 +217,7 @@ def new_proxy(update, context):
             return
 
     save_proxies(proxies)
-    update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s):\n" + "\n".join(new_proxies))
+    update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s, sống {lifetime} ngày):\n" + "\n".join(new_proxies))
 
 # Lệnh /xoa: Xóa proxy riêng lẻ
 @restrict_to_admin
@@ -249,7 +251,7 @@ def delete_all(update, context):
     save_proxies([])
     update.message.reply_text("Đã xóa tất cả proxy!")
 
-# Lệnh /list 1: Liệt kê proxy đang sử dụng
+# Lệnh /list: Liệt kê proxy đang sử dụng
 @restrict_to_admin
 def list_used(update, context):
     proxies = load_proxies()
@@ -276,7 +278,7 @@ def list_used(update, context):
 
     result = [f"Page {page}/{total_pages}"]
     for proxy in used_proxies[start:end]:
-        days_left = (datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=30) - datetime.now()).days
+        days_left = (datetime.fromisoformat(proxy["first_connect"]) + timedelta(days=proxy["lifetime"]) - datetime.now()).days
         result.append(f"{proxy['ip']}:{proxy['port']}:{proxy['user']}:{proxy['pass']} (Còn {days_left} ngày, 35 MB/s)")
     update.message.reply_text("\n".join(result))
 
@@ -288,7 +290,7 @@ def list_unused(update, context):
     if not unused_proxies:
         update.message.reply_text("Không có proxy nào chưa sử dụng!")
         return
-    result = [f"{p['ip']}:{p['port']}:{p['user']}:{p['pass']} (35 MB/s)" for p in unused_proxies]
+    result = [f"{p['ip']}:{p['port']}:{p['user']}:{p['pass']} ({p['lifetime']} ngày, 35 MB/s)" for p in unused_proxies]
     update.message.reply_text("\n".join(result))
 
 # Main
