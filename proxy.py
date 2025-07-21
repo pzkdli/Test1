@@ -27,41 +27,38 @@ def generate_password():
 # Lấy IPv4 của VPS
 def get_vps_ip():
     try:
-        # Phương pháp 1: Sử dụng lệnh `ip` để lấy IPv4
         result = subprocess.check_output("ip -4 addr show | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d'/' -f1 | head -n 1", shell=True).decode().strip()
+        print(f"DEBUG: IP from ip command: {result}")
         if result:
             return result
     except:
         pass
-
     try:
-        # Phương pháp 2: Sử dụng ifconfig (nếu ip không hoạt động)
         result = subprocess.check_output("ifconfig | grep 'inet ' | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1", shell=True).decode().strip()
+        print(f"DEBUG: IP from ifconfig: {result}")
         if result:
             return result
     except:
         pass
-
     try:
-        # Phương pháp 3: Sử dụng socket để lấy IPv4
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
+        print(f"DEBUG: IP from socket: {ip}")
         s.close()
         if ip and ip != "127.0.0.1":
             return ip
     except:
         pass
-
     try:
-        # Phương pháp 4: Sử dụng API bên ngoài
         result = subprocess.check_output("curl -s -4 ifconfig.me", shell=True).decode().strip()
+        print(f"DEBUG: IP from curl: {result}")
         if result:
             return result
     except:
         pass
-
-    return "127.0.0.1"  # Fallback nếu tất cả phương pháp thất bại
+    print("DEBUG: Falling back to 127.0.0.1")
+    return "127.0.0.1"
 
 # Đọc proxies từ file JSON
 def load_proxies():
@@ -96,28 +93,41 @@ def add_port_and_delay_pool(port):
     
     # Xóa dòng delay_pools cũ
     new_lines = [line for line in lines if not line.startswith("delay_pools ")]
-    pool_count = sum(1 for line in lines if line.startswith("acl proxy_")) + 1
+    
+    # Đếm số lượng pool hiện có (dựa trên acl proxy_)
+    pool_count = sum(1 for line in new_lines if line.startswith("acl proxy_")) + 1
     
     # Thêm cổng vào trước http_access
     http_access_index = next(i for i, line in enumerate(new_lines) if line.startswith("http_access ") or line.startswith("# Quy tắc truy cập"))
     new_lines.insert(http_access_index, f"http_port {port}\n")
     
-    # Cập nhật delay_pools
+    # Tìm vị trí để chèn cấu hình delay pool
     delay_pools_index = next((i for i, line in enumerate(new_lines) if line.startswith("# Cấu hình giới hạn băng thông")), len(new_lines) - 1)
+    
+    # Cập nhật delay_pools
     new_lines[delay_pools_index] = f"delay_pools {pool_count}\n"
     
-    # Thêm cấu hình delay pool
-    new_lines.append(f"acl proxy_{port} localport {port}\n")
-    new_lines.append(f"delay_class {pool_count} 1\n")
-    new_lines.append(f"delay_parameters {pool_count} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n")
-    new_lines.append(f"delay_access {pool_count} allow proxy_{port}\n")
-    new_lines.append(f"delay_access {pool_count} deny all\n")
+    # Thêm cấu hình delay pool ngay sau delay_pools
+    delay_config = [
+        f"acl proxy_{port} localport {port}\n",
+        f"delay_class {pool_count} 1\n",
+        f"delay_parameters {pool_count} {BANDWIDTH_LIMIT_KBPS}/{BANDWIDTH_LIMIT_KBPS}\n",
+        f"delay_access {pool_count} allow proxy_{port}\n",
+        f"delay_access {pool_count} deny all\n"
+    ]
+    new_lines[delay_pools_index + 1:delay_pools_index + 1] = delay_config
     
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
     
+    # Kiểm tra cú pháp file cấu hình
+    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"Error in Squid configuration: {result.stderr.decode()}")
+        return False
+    
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -146,8 +156,14 @@ def remove_port_and_delay_pool(port):
     with open(SQUID_CONF, "w") as f:
         f.writelines(new_lines)
     
+    # Kiểm tra cú pháp file cấu hình
+    result = subprocess.run("squid -k parse", shell=True, stdout=subprocess_PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"Error in Squid configuration: {result.stderr.decode()}")
+        return False
+    
     # Tải lại cấu hình Squid
-    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run("squid -k reconfigure", shell=True, stdout=subprocess_PIPE, stderr=subprocess_PIPE)
     if result.returncode != 0:
         print(f"Error reconfiguring Squid: {result.stderr.decode()}")
         return False
@@ -160,7 +176,7 @@ def update_first_connect():
         with open(SQUID_LOG, "r") as log:
             for line in log:
                 for proxy in proxies:
-                    if proxy["first_connect"] is None and f":{province['port']}" in line:
+                    if proxy["first_connect"] is None and f":{proxy['port']}" in line:
                         proxy["first_connect"] = datetime.now().isoformat()
                         save_proxies(proxies)
                         break
@@ -214,6 +230,7 @@ def new_proxy(update, context):
         return
 
     vps_ip = get_vps_ip()
+    print(f"DEBUG: VPS IP = {vps_ip}")  # Debug IP
     used_ports = get_used_ports()
     new_proxies = []
 
@@ -233,17 +250,14 @@ def new_proxy(update, context):
             "user": "vtoan5516",
             "pass": password,
             "first_connect": None,
-            "lifetime": lifetime  # Lưu số ngày sống
+            "lifetime": lifetime
         }
         proxies.append(proxy)
         new_proxies.append(f"{vps_ip}:{port}:vtoan5516:{password}")
         used_ports.append(port)
         # Thêm user/pass vào Squid
         result = subprocess.run(f"htpasswd -b /etc/squid/passwd vtoan5516_{port} {password}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode == 0:
-            print(f"Adding password for user vtoan5516_{port}")
-        else:
-            print(f"Error adding password for vtoan5516_{port}: {result.stderr.decode()}")
+        print(f"DEBUG: htpasswd result for vtoan5516_{port}: {result.returncode}, stderr: {result.stderr.decode()}")
         # Thêm cổng và delay pool
         if not add_port_and_delay_pool(port):
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid. Vui lòng kiểm tra dịch vụ Squid!")
