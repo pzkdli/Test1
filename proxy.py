@@ -105,6 +105,12 @@ def assign_ipv6(ipv6):
             print("DEBUG: No network interface found")
             return False
         
+        # Kiểm tra xem IPv6 đã được gán chưa
+        result = subprocess.run(f"ip -6 addr show dev {interface}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if ipv6 in result.stdout.decode():
+            print(f"DEBUG: IPv6 {ipv6} already assigned to {interface}")
+            return True
+        
         # Gán IPv6
         cmd = f"ip -6 addr add {ipv6}/64 dev {interface}"
         result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -165,7 +171,12 @@ def is_squid_running():
 def add_port_and_delay_pool(ipv6, port):
     if not is_squid_running():
         print("Squid is not running. Please start Squid service.")
-        return False
+        return False, "Squid is not running"
+
+    # Kiểm tra IPv6 có được gán không
+    result = subprocess.run("ip -6 addr", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if ipv6 not in result.stdout.decode():
+        return False, f"IPv6 {ipv6} not assigned on system"
 
     with open(SQUID_CONF, "r") as f:
         lines = f.readlines()
@@ -211,18 +222,17 @@ def add_port_and_delay_pool(ipv6, port):
         return False, f"Lỗi khi reload Squid: {error}"
     
     # Kiểm tra cổng có được mở không
-    time.sleep(10)  # Đợi 10 giây để Squid reload
+    time.sleep(15)  # Đợi 15 giây để Squid reload
     result = subprocess.run(f"ss -tuln | grep :{port}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         print(f"DEBUG: Port {port} is not open!")
-        # Kiểm tra log Squid
+        # Kiểm tra log Squid, chỉ lấy 10 dòng cuối
         log_output = ""
-        for log_file in [SQUID_CACHE_LOG, SQUID_LOG, "/var/log/squid/squid.log"]:
-            try:
-                result = subprocess.run(f"tail -n 20 {log_file}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                log_output += f"\nLog {log_file}:\n{result.stdout.decode().strip()}"
-            except:
-                log_output += f"\nLog {log_file}: Không tìm thấy"
+        try:
+            result = subprocess.run(f"tail -n 10 {SQUID_CACHE_LOG}", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            log_output = f"Log {SQUID_CACHE_LOG}:\n{result.stdout.decode().strip()}"
+        except:
+            log_output = f"Log {SQUID_CACHE_LOG}: Không tìm thấy"
         print(f"DEBUG: Squid logs: {log_output}")
         return False, f"Cổng {port} không mở. Log Squid: {log_output}"
     print(f"DEBUG: Port {port} is open")
@@ -295,8 +305,8 @@ def check_expired_periodically():
     while True:
         update_first_connect()
         delete_expired()
-        time.sleep(800)  # 24 giờ
-    
+        time.sleep(600)  # 24 giờ
+
 # Kiểm tra quyền admin
 def restrict_to_admin(func):
     def wrapper(update, context):
@@ -417,6 +427,8 @@ def new_proxy(update, context):
         # Thêm cổng và delay pool
         success, error_msg = add_port_and_delay_pool(ipv6, port)
         if not success:
+            # Cắt ngắn error_msg để tránh lỗi Telegram
+            error_msg = error_msg[:1000] + "..." if len(error_msg) > 1000 else error_msg
             update.message.reply_text(f"Không thể thêm cổng {port} vào Squid: {error_msg}")
             return
         print(f"DEBUG: Added proxy {ipv4}:{port} with IPv6 {ipv6} and user {username}")
