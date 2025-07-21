@@ -8,40 +8,63 @@ import threading
 import time
 import os
 import socket
-import re
+import ipaddress
 
 # Cấu hình
 BOT_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
 ADMIN_ID = 7550813603
 SQUID_LOG = "/var/log/squid/access.log"
 JSON_PATH = "/root/proxies.json"
+IPV6_RANGE_PATH = "/root/ipv6_range.json"
 SQUID_CONF = "/etc/squid/squid.conf"
 BANDWIDTH_LIMIT_KBPS = 280000  # 35 MB/s = 280000 kbps
 MIN_PORT = 10000
 MAX_PORT = 60000
 MAX_PROXIES = 2000  # Tối đa 2000 proxy
 
+# Nhập dải IPv6 /64
+def get_ipv6_range():
+    if os.path.exists(IPV6_RANGE_PATH):
+        with open(IPV6_RANGE_PATH, "r") as f:
+            data = json.load(f)
+            return data.get("ipv6_range")
+    
+    while True:
+        ipv6_range = input("Nhập dải IPv6 /64 (ví dụ: 2405:19c0:3:2e45::/64): ").strip()
+        try:
+            network = ipaddress.IPv6Network(ipv6_range, strict=True)
+            if network.prefixlen != 64:
+                print("Dải phải là /64!")
+                continue
+            with open(IPV6_RANGE_PATH, "w") as f:
+                json.dump({"ipv6_range": ipv6_range}, f)
+            return ipv6_range
+        except ValueError as e:
+            print(f"Lỗi: {e}. Vui lòng nhập dải IPv6 /64 hợp lệ.")
+
+# Tạo địa chỉ IPv6 từ dải /64
+def generate_ipv6_from_range(ipv6_range, index):
+    try:
+        network = ipaddress.IPv6Network(ipv6_range)
+        return str(network[index])
+    except Exception as e:
+        print(f"DEBUG: Error generating IPv6: {str(e)}")
+        return None
+
+# Lấy IPv6 chưa sử dụng
+def get_unused_ipv6(proxies, ipv6_range):
+    used_ipv6 = {proxy["ip"] for proxy in proxies}
+    index = len(used_ipv6) + 1  # Bắt đầu từ 1 để tránh ::0
+    for _ in range(100):  # Thử tối đa 100 địa chỉ
+        ipv6 = generate_ipv6_from_range(ipv6_range, index)
+        if ipv6 and ipv6 not in used_ipv6:
+            return ipv6
+        index += 1
+    return None
+
 # Tạo mật khẩu ngẫu nhiên (8 chữ cái thường)
 def generate_password():
     return ''.join(random.choices(string.ascii_lowercase, k=8))
-
-# Lấy danh sách IPv6 của VPS
-def get_vps_ipv6_list():
-    try:
-        result = subprocess.check_output("ip -6 addr show | grep inet6 | grep global | awk '{print $2}' | cut -d'/' -f1", shell=True).decode().strip()
-        ipv6_list = result.split('\n')
-        ipv6_list = [ip for ip in ipv6_list if ip and ':' in ip]
-        print(f"DEBUG: IPv6 list: {ipv6_list}")
-        return ipv6_list
-    except Exception as e:
-        print(f"DEBUG: Error getting IPv6 list: {str(e)}")
-        return []
-
-# Lấy IPv6 chưa sử dụng
-def get_unused_ipv6(proxies, ipv6_list):
-    used_ipv6 = {proxy["ip"] for proxy in proxies}
-    available_ipv6 = [ip for ip in ipv6_list if ip not in used_ipv6]
-    return random.choice(available_ipv6) if available_ipv6 else None
 
 # Đọc proxies từ file JSON
 def load_proxies():
@@ -259,9 +282,9 @@ def new_proxy(update, context):
         update.message.reply_text(f"Chỉ có thể tạo thêm {MAX_PROXIES - len(proxies)} proxy để không vượt quá {MAX_PROXIES} proxy!")
         return
 
-    ipv6_list = get_vps_ipv6_list()
-    if not ipv6_list:
-        update.message.reply_text("Không tìm thấy địa chỉ IPv6 trên VPS!")
+    ipv6_range = get_ipv6_range()
+    if not ipv6_range:
+        update.message.reply_text("Chưa cấu hình dải IPv6 /64!")
         return
 
     used_ports = get_used_ports()
@@ -276,7 +299,7 @@ def new_proxy(update, context):
             update.message.reply_text("Không tìm được cổng trống sau nhiều lần thử!")
             return
 
-        ipv6 = get_unused_ipv6(proxies, ipv6_list)
+        ipv6 = get_unused_ipv6(proxies, ipv6_range)
         if not ipv6:
             update.message.reply_text("Không còn địa chỉ IPv6 trống!")
             return
@@ -302,7 +325,16 @@ def new_proxy(update, context):
             return
 
     save_proxies(proxies)
-    update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s, sống {lifetime} ngày):\n" + "\n".join(new_proxies))
+    
+    # Xử lý đầu ra dựa trên số lượng proxy
+    if count < 10:
+        update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s, sống {lifetime} ngày):\n" + "\n".join(new_proxies))
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M")
+        output_file = f"/root/proxies_{timestamp}.txt"
+        with open(output_file, "w") as f:
+            f.write("\n".join(new_proxies))
+        update.message.reply_text(f"Đã tạo {count} proxy (giới hạn 35 MB/s, sống {lifetime} ngày). Danh sách proxy đã được lưu vào {output_file}")
 
 # Lệnh /xoa: Xóa proxy riêng lẻ
 @restrict_to_admin
@@ -381,6 +413,9 @@ def list_unused(update, context):
 
 # Main
 def main():
+    # Nhập dải IPv6 khi khởi động
+    get_ipv6_range()
+    
     # Khởi động thread kiểm tra hết hạn
     threading.Thread(target=check_expired_periodically, daemon=True).start()
     
