@@ -2,16 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Manager Bot — 1 file
-- Admin chính: MAIN_ADMIN_ID
-- Bot quản lý: BOT_TOKEN
-Tính năng:
-  * Thêm admin phụ theo NGÀY (0 = vĩnh viễn), set quota (số bot tối đa)
-  * Sub-admin: tạo bot mới -> sinh folder chứa welcome_bot_single.py + join.py + config.json
-  * Tự chạy 2 tiến trình con & auto-restart; stop nếu sub-admin hết hạn
-  * Khởi động -> bootstrap lại bot con còn hạn
-  * Panel bán: bật/tắt bán + sửa nội dung; người lạ nhấn BUY sẽ nhận nội dung admin đặt
-  * /id (in nghiêng), /vps (CPU/RAM/Disk), /huongdan
+VIP TOOL (Manager Bot) — Single file
+- Quản lý sub-admin (ngày/quota), tạo bot phụ (welcome + join), auto-run & auto-restart
+- Ổn định Ubuntu/Termux, ưu tiên venv interpreter, auto-cài libs
 """
 
 import os, sys, json, time, shutil, subprocess, importlib.util, signal, threading
@@ -46,31 +39,40 @@ DEFAULT_STATE = {
 WELCOME_BOT_TEMPLATE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sub Bot — welcome + panel + throttle + auto-delete + notify owner + /id
+Sub Bot — welcome + panel + throttle + auto-delete + notify owner + /id + /stats
+(ĐÃ FIX: run_polling block + keep-alive; dọn state mỗi 24h; toggle notify DM)
 """
-import os, json, time, asyncio
+import os, json, time, asyncio, logging
 from typing import Dict
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, User
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
+# ====== CHÈN TỪ MANAGER LÚC TẠO BOT ======
 BOT_TOKEN = "__BOT_TOKEN__"
 ADMIN_ID  = __ADMIN_ID__
+# =========================================
+
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
+log = logging.getLogger("welcome-subbot")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 STATE_PATH  = os.path.join(APP_DIR, "state.json")
 
 DEFAULT_CONFIG = {
-    "bot_token": "__BOT_TOKEN__",
-    "admin_id": __ADMIN_ID__,
+    "bot_token": BOT_TOKEN,
+    "admin_id": ADMIN_ID,
     "enabled": True,
     "delete_after_seconds": 0.1,
     "tag_enabled": True,
     "cooldown_seconds": 10.0,
     "dm_notify_enabled": True,
     "start_reply": "👋 Xin chào!",
-    "welcome": {"text": "Xin chào {tag} 👋\nChào mừng bạn đến với <b>{chat_title}</b>!", "photo_path": ""}
+    "welcome": {
+        "text": "Xin chào {tag} 👋\nChào mừng bạn đến với <b>{chat_title}</b>!",
+        "photo_path": ""
+    }
 }
 pending_action: Dict[int, str] = {}
 last_sent_at: Dict[int, float] = {}
@@ -80,19 +82,43 @@ def ensure_files():
     if not os.path.exists(CONFIG_PATH):
         save_config(DEFAULT_CONFIG)
     if not os.path.exists(STATE_PATH):
-        save_state({"welcome_messages": {}, "stats": {"total_messages_sent": 0}})
+        save_state({"welcome_messages": {}, "stats": {"total_messages_sent": 0}, "groups": [], "group_joins": {}, "last_cleanup": int(time.time())})
 
 def load_config() -> dict:
     ensure_files()
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
 def save_config(cfg: dict):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+def _maybe_cleanup(st: dict) -> dict:
+    now = int(time.time())
+    last = int(st.get("last_cleanup", 0))
+    if now - last >= 86400:  # 24h
+        st["welcome_messages"] = {}
+        st["stats"] = st.get("stats", {})
+        st["stats"]["total_messages_sent"] = st["stats"].get("total_messages_sent", 0)  # giữ tổng
+        st["groups"] = []
+        st["group_joins"] = {}
+        st["last_cleanup"] = now
+    return st
+
 def load_state() -> dict:
     ensure_files()
     with open(STATE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        st = json.load(f)
+    # ensure keys + cleanup
+    st.setdefault("welcome_messages", {})
+    st.setdefault("stats", {"total_messages_sent": 0})
+    st.setdefault("groups", [])
+    st.setdefault("group_joins", {})
+    st.setdefault("last_cleanup", int(time.time()))
+    st = _maybe_cleanup(st)
+    save_state(st)
+    return st
+
 def save_state(st: dict):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
@@ -111,12 +137,11 @@ def tag_or_name(u: 'User', on: bool) -> str:
     return mention(u) if on else (u.first_name or "bạn")
 
 def fmt_text(tpl: str, chat_title: str, u: 'User', tag_on: bool) -> str:
-    return (tpl
-        .replace("{first_name}", u.first_name or "")
-        .replace("{last_name}", u.last_name or "")
-        .replace("{mention}", mention(u))
-        .replace("{tag}", tag_or_name(u, tag_on))
-        .replace("{chat_title}", chat_title or ""))
+    return (tpl.replace("{first_name}", u.first_name or "")
+              .replace("{last_name}", u.last_name or "")
+              .replace("{mention}", mention(u))
+              .replace("{tag}", tag_or_name(u, tag_on))
+              .replace("{chat_title}", chat_title or ""))
 
 def lock_for_chat(cid: int) -> asyncio.Lock:
     if cid not in chat_locks:
@@ -129,8 +154,10 @@ async def purge_old(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE):
     if not mids: return
     keep = []
     for mid in mids:
-        try: await ctx.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception: keep.append(mid)
+        try:
+            await ctx.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            keep.append(mid)
     st["welcome_messages"][str(chat_id)] = keep[-10:] if keep else []
     save_state(st)
 
@@ -141,6 +168,11 @@ async def track_msg(chat_id: int, mid: int):
     st.setdefault("welcome_messages", {})[str(chat_id)] = arr[-20:]
     st.setdefault("stats", {}).setdefault("total_messages_sent", 0)
     st["stats"]["total_messages_sent"] += 1
+    if chat_id not in st.get("groups", []):
+        st["groups"].append(chat_id)
+    gj = st.get("group_joins", {})
+    gj[str(chat_id)] = gj.get(str(chat_id), 0) + 1
+    st["group_joins"] = gj
     save_state(st)
 
 def allowed_now(chat_id: int, cooldown: float) -> bool:
@@ -154,10 +186,10 @@ def allowed_now(chat_id: int, cooldown: float) -> bool:
 async def send_and_autodel(chat_id: int, chat_title: str, user: 'User', ctx: ContextTypes.DEFAULT_TYPE):
     cfg = load_config()
     if not cfg.get("enabled", True): return
-    tpl       = cfg["welcome"]["text"]
-    photo     = cfg["welcome"]["photo_path"].strip()
-    delay     = float(cfg["delete_after_seconds"])
-    tag_on    = bool(cfg["tag_enabled"])
+    tpl    = cfg["welcome"]["text"]
+    photo  = cfg["welcome"]["photo_path"].strip()
+    delay  = float(cfg["delete_after_seconds"])
+    tag_on = bool(cfg["tag_enabled"])
 
     await purge_old(chat_id, ctx)
     text = fmt_text(tpl, chat_title, user, tag_on)
@@ -176,7 +208,6 @@ async def send_and_autodel(chat_id: int, chat_title: str, user: 'User', ctx: Con
         return
 
     await track_msg(chat_id, msg.message_id)
-    await notify_owner(ctx, f"🆕 Vừa chào {mention(user)} tại nhóm <b>{chat_title or chat_id}</b>.")
 
     async def _del():
         try:
@@ -191,9 +222,8 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat   = update.effective_chat
     title  = (chat.title or chat.full_name or "")
     cid    = chat.id
-    latest = update.message.new_chat_members[-1]
-    cfg    = load_config()
-    cooldown = float(cfg["cooldown_seconds"])
+    latest = update.message.new_chat_members[-1]  # chỉ chào người mới nhất
+    cooldown = float(load_config().get("cooldown_seconds", 10.0))
     async with lock_for_chat(cid):
         if not allowed_now(cid, cooldown): return
         await send_and_autodel(cid, title, latest, context)
@@ -203,16 +233,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if u and u.id == ADMIN_ID:
         await update.message.reply_text("✅ Bot con OK. Gõ /panel để mở quản trị.")
         return
-    reply = load_config().get("start_reply", "👋 Xin chào!")
+    cfg = load_config()
+    reply = cfg.get("start_reply", "👋 Xin chào!")
     try:
         await update.message.reply_text(reply)
     finally:
-        await notify_owner(context, f"🔔 Có người: {mention(u)} đã nhắn với bot (private).")
+        if cfg.get("dm_notify_enabled", True):
+            await notify_owner(context, f"🔔 Có người: {mention(u)} đã nhắn với bot (private).")
 
 async def on_private_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
-    if update.effective_user and update.effective_user.id == ADMIN_ID: return
-    await notify_owner(context, f"🔔 Có người: {mention(update.effective_user)} đã nhắn với bot (private).")
+    cfg = load_config()
+    if cfg.get("dm_notify_enabled", True):
+        await notify_owner(context, f"🔔 Có người: {mention(update.effective_user)} đã nhắn với bot (private).")
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
@@ -221,16 +254,31 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = getattr(target, "full_name", None) or target.first_name or "người dùng"
     await update.message.reply_text(f"🆔 ID của {name}: <i>{uid}</i>", parse_mode=ParseMode.HTML)
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    st = load_state()
+    groups = st.get("groups", [])
+    joins = st.get("group_joins", {})
+    msg = (f"📊 Thống kê 24h gần nhất:\n"
+           f"- Số nhóm đã chào: {len(groups)}\n"
+           f"- Tổng tin nhắn chào đã gửi: {st.get('stats',{}).get('total_messages_sent',0)}\n"
+           f"- Lượt chào theo nhóm (top 5):\n")
+    items = sorted(joins.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    for cid, c in items:
+        msg += f"  • {cid}: {c}\n"
+    await update.message.reply_text(msg)
+
 def panel(cfg: dict) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🟢 BẬT" if cfg.get("enabled", True) else "🔴 TẮT", callback_data="TOGGLE_ENABLED"),
          InlineKeyboardButton(f"⏱ Del: {cfg.get('delete_after_seconds',0.1)}s", callback_data="SET_DELAY")],
         [InlineKeyboardButton("🏷 TAG: ON" if cfg.get("tag_enabled", True) else "🏷 TAG: OFF", callback_data="TOGGLE_TAG"),
          InlineKeyboardButton(f"🛑 Cooldown: {cfg.get('cooldown_seconds',10.0)}s", callback_data="SET_COOLDOWN")],
+        [InlineKeyboardButton("🔔 Notify DM: ON" if cfg.get("dm_notify_enabled", True) else "🔕 Notify DM: OFF", callback_data="TOGGLE_DM")],
         [InlineKeyboardButton("🗨️ Reply(/start)", callback_data="SET_REPLYTEXT"),
          InlineKeyboardButton("🖼 Ảnh chào", callback_data="SET_PHOTO")],
         [InlineKeyboardButton("📝 Nội dung chào", callback_data="SET_TEXT"),
-         InlineKeyboardButton("👁 Cấu hình", callback_data="SHOW_CFG")],
+         InlineKeyboardButton("📊 /stats", callback_data="SHOW_STATS")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -244,42 +292,25 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = load_config(); d = q.data
     if d == "TOGGLE_ENABLED":
         cfg["enabled"] = not cfg.get("enabled", True); save_config(cfg)
-        try: await q.message.edit_text("⚙️ Panel:", reply_markup=panel(cfg))
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel:", reply_markup=panel(cfg))
     elif d == "TOGGLE_TAG":
         cfg["tag_enabled"] = not cfg.get("tag_enabled", True); save_config(cfg)
-        try: await q.message.edit_text("⚙️ Panel:", reply_markup=panel(cfg))
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel:", reply_markup=panel(cfg))
+    elif d == "TOGGLE_DM":
+        cfg["dm_notify_enabled"] = not cfg.get("dm_notify_enabled", True); save_config(cfg)
     elif d == "SET_DELAY":
-        pending_action[ADMIN_ID] = "SET_DELAY"
-        try: await q.message.edit_text("⏱ Gửi số giây auto-delete (vd 0.1).")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⏱ Gửi số giây auto-delete (vd 0.1).")
+        pending_action[ADMIN_ID] = "SET_DELAY"; await q.message.edit_text("⏱ Gửi số giây auto-delete (vd 0.1)."); return
     elif d == "SET_COOLDOWN":
-        pending_action[ADMIN_ID] = "SET_COOLDOWN"
-        try: await q.message.edit_text("🛑 Gửi cooldown (giây), vd 10.")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="🛑 Gửi cooldown (giây), vd 10.")
+        pending_action[ADMIN_ID] = "SET_COOLDOWN"; await q.message.edit_text("🛑 Gửi cooldown (giây), vd 10."); return
     elif d == "SET_TEXT":
-        pending_action[ADMIN_ID] = "SET_TEXT"
-        try: await q.message.edit_text("📝 Gửi nội dung chào. Biến: {first_name} {last_name} {mention} {tag} {chat_title}")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="📝 …")
+        pending_action[ADMIN_ID] = "SET_TEXT"; await q.message.edit_text("📝 Gửi nội dung chào. Biến: {first_name} {last_name} {mention} {tag} {chat_title}"); return
     elif d == "SET_REPLYTEXT":
-        pending_action[ADMIN_ID] = "SET_REPLYTEXT"
-        try: await q.message.edit_text("🗨️ Gửi reply /start (private).")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="🗨️ …")
+        pending_action[ADMIN_ID] = "SET_REPLYTEXT"; await q.message.edit_text("🗨️ Gửi reply /start (private)."); return
     elif d == "SET_PHOTO":
-        pending_action[ADMIN_ID] = "SET_PHOTO"
-        try: await q.message.edit_text("🖼 Gửi ảnh hoặc URL http(s).")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="🖼 …")
-    elif d == "SHOW_CFG":
-        txt = (f"<b>enabled</b>: {cfg.get('enabled', True)}\n"
-               f"<b>delete_after_seconds</b>: {cfg.get('delete_after_seconds',0.1)}\n"
-               f"<b>tag_enabled</b>: {cfg.get('tag_enabled', True)}\n"
-               f"<b>cooldown_seconds</b>: {cfg.get('cooldown_seconds',10.0)}\n"
-               f"<b>start_reply</b>: <pre>{cfg.get('start_reply','')}</pre>\n"
-               f"<b>welcome.text</b>:\n<pre>{cfg.get('welcome',{}).get('text','')}</pre>\n"
-               f"<b>welcome.photo_path</b>: {cfg.get('welcome',{}).get('photo_path','') or '(không)'}")
-        try: await q.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=panel(cfg))
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text=txt, parse_mode=ParseMode.HTML, reply_markup=panel(cfg))
+        pending_action[ADMIN_ID] = "SET_PHOTO"; await q.message.edit_text("🖼 Gửi ảnh hoặc URL http(s)."); return
+    elif d == "SHOW_STATS":
+        await cmd_stats(Update(update.update_id, update.effective_message), context); return
+    # refresh panel
+    try: await q.message.edit_text("⚙️ Panel:", reply_markup=panel(load_config()))
+    except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel:", reply_markup=panel(load_config()))
 
 async def on_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -313,29 +344,45 @@ async def on_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending_action.pop(ADMIN_ID, None)
     await context.bot.send_message(chat_id=ADMIN_ID, text="⚙️ Panel:", reply_markup=panel(load_config()))
 
-def main_sub():
+async def _run_bot():
     cfg = load_config()
-    token = (cfg.get("bot_token") or BOT_TOKEN).strip()
+    token = (cfg.get("bot_token") or BOT_TOKEN or "").strip()
     if not token or token == "__BOT_TOKEN__":
-        raise SystemExit("❌ Chưa cấu hình BOT_TOKEN")
+        raise SystemExit("❌ Chưa cấu hình BOT_TOKEN (subbot)")
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("panel", cmd_panel))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_ID) & (filters.TEXT | filters.PHOTO), on_admin_input))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.User(user_id=ADMIN_ID) & filters.TEXT, on_private_non_admin))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
-    print("🤖 Sub-bot started.")
-    app.run_polling(close_loop=False)
+    log.info("🤖 Sub-bot starting polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+    log.warning("run_polling() returned — keepalive loop")
+    try:
+        while True: time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+
+def main():
+    try:
+        asyncio.run(_run_bot())
+    except RuntimeError:
+        import nest_asyncio
+        nest_asyncio.apply()
+        loop = asyncio.get_event_loop()
+        loop.create_task(_run_bot())
+        loop.run_forever()
 
 if __name__ == "__main__":
-    main_sub()
+    main()
 '''
 
 JOIN_PY_TEMPLATE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot_delete_join_messages.py
+# bot_delete_join_messages.py — xoá "đã tham gia" + /id
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -434,6 +481,7 @@ def _pip_exec() -> list:
     return [sys.executable or "python3", "-m", "pip"]
 
 def ensure_global_deps():
+    """Cài libs thiếu cho tiến trình con (Ubuntu/Termux)."""
     try:
         need = []
         if not _module_exists("pyrogram"): need += ["pyrogram"]
@@ -442,6 +490,7 @@ def ensure_global_deps():
             import telegram  # noqa
         except Exception:
             need += ["python-telegram-bot==21.6"]
+        if not _module_exists("psutil"): need += ["psutil"]
         if need:
             print(f"[DEPS] Installing: {need}")
             subprocess.run(_pip_exec()+["install"]+need, check=False)
@@ -452,6 +501,7 @@ def ensure_global_deps():
 supervisors: Dict[tuple, dict] = {}
 
 def _pick_python_exec() -> str:
+    """Ưu tiên venv cùng thư mục; nếu đang ở venv khác thì dùng sys.executable; fallback python3."""
     venv_py = os.path.join(APP_DIR, ".venv", "bin", "python")
     if os.path.exists(venv_py): return venv_py
     if sys.prefix != sys.base_prefix and sys.executable: return sys.executable
