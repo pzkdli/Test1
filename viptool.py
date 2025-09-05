@@ -2,17 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-Manager Bot — Quản lý bot con (1 file, Termux-friendly)
+Manager Bot — Quản lý bot con (1 file, Termux/Ubuntu friendly)
 - Admin chính: 7550813603
 - Tính năng:
-  * Thêm admin phụ theo NGÀY (0 = vĩnh viễn), set quota (số bot tối đa)
-  * Sub-admin: tạo bot mới → tool sinh folder & (welcome_bot_single.py + join.py + config.json)
-  * Tự chạy 2 tiến trình bot con và auto-restart khi crash (thread + subprocess giám sát)
-  * Khi khởi động tool → tự bootstrap chạy lại toàn bộ bot con của sub-admin còn hạn; dừng bot của sub-admin hết hạn
-  * Hết hạn: dừng tất cả bot con; Gia hạn: tự chạy lại
-  * Panel bán: bật/tắt bán + soạn nội dung bán; người lạ nhấn BUY được trả lời theo nội dung admin đặt
-  * /id (chữ nghiêng), /vps (CPU/RAM/Disk), /huongdan
-  * Private: admin chính/phụ nhắn bất kỳ → hiện panel tương ứng (khi không ở wizard)
+  * Sub-admin theo NGÀY (0 = vĩnh viễn), quota số bot
+  * Tạo bot con → sinh folder + welcome_bot_single.py + join.py + config.json
+  * Tự chạy 2 tiến trình con & auto-restart (supervisor bằng thread + subprocess)
+  * Khởi động -> bootstrap lại bot con còn hạn; enforcer định kỳ stop/start theo hạn
+  * Panel bán (toggle & soạn nội dung)
+  * /id (in nghiêng), /vps (CPU/RAM/Disk), /huongdan
+  * Log rõ ràng để debug khi bot phụ không chạy
 """
 
 import os, sys, json, time, shutil, subprocess, importlib.util, signal, threading
@@ -27,7 +26,7 @@ from telegram.ext import (
 
 # ======================== CẤU HÌNH ========================
 BOT_TOKEN = "8442522633:AAHuI8o-OQXQHlvH2sGRQzRzPItESX9KoNc"  # BOT QUẢN LÝ
-MAIN_ADMIN_ID = 7550813603
+MAIN_ADMIN_ID = 7550813603                                     # ADMIN CHÍNH
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR  = os.path.join(APP_DIR, "manager_data")
@@ -39,12 +38,12 @@ os.makedirs(BOTS_DIR, exist_ok=True)
 
 DEFAULT_STATE = {
     "sub_admins": {},   # "uid_str": {"expires_at": epoch|0, "quota": 1}
-    "bots": [],         # {"id": "uid_ts", "owner_id": 123, "folder": "...", "token_masked": "xxxx...yyyy", "created_at": ts}
+    "bots": [],         # {"id": label, "owner_id": int, "folder": str, "token_masked": str, "created_at": ts}
     "sale": {"enabled": False, "text": "Vui lòng liên hệ admin để mua key/bot."},
     "non_admin_reply": "Xin chào! Đây là bot quản lý. Nhấn nút bên dưới nếu bạn muốn mua key/bot."
 }
 
-# ======================== TEMPLATES BOT CON ========================
+# ======================== TEMPLATE BOT CON ========================
 WELCOME_BOT_TEMPLATE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -56,9 +55,9 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, User
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# CHÈN TRỰC TIẾP
 BOT_TOKEN = "__BOT_TOKEN__"
-ADMIN_ID  = __ADMIN_ID__
+ADMIN_ID  = __ADMIN_ID__          # chủ bot phụ
+MAIN_ADMIN_ID = __MAIN_ADMIN_ID__ # admin chính (cũng có quyền)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
@@ -73,14 +72,14 @@ DEFAULT_CONFIG = {
     "cooldown_seconds": 10.0,
     "dm_notify_enabled": True,
     "start_reply": "👋 Xin chào!",
-    "welcome": {
-        "text": "Xin chào {tag} 👋\nChào mừng bạn đến với <b>{chat_title}</b>!",
-        "photo_path": ""
-    }
+    "welcome": {"text": "Xin chào {tag} 👋\nChào mừng bạn đến với <b>{chat_title}</b>!", "photo_path": ""}
 }
 pending_action: Dict[int, str] = {}
 last_sent_at: Dict[int, float] = {}
 chat_locks: Dict[int, asyncio.Lock] = {}
+
+def _is_owner(uid: int) -> bool:
+    return uid in (ADMIN_ID, MAIN_ADMIN_ID)
 
 def ensure_files():
     if not os.path.exists(CONFIG_PATH):
@@ -209,7 +208,7 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user and user.id == ADMIN_ID:
+    if user and _is_owner(user.id):
         await update.message.reply_text("✅ Bot con OK. Gõ /panel để mở quản trị.")
         return
     reply = load_config().get("start_reply", "👋 Xin chào!")
@@ -220,7 +219,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_private_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
-    if update.effective_user and update.effective_user.id == ADMIN_ID: return
+    if update.effective_user and _is_owner(update.effective_user.id): return
     await notify_owner(context, f"🔔 Có người: {mention(update.effective_user)} đã nhắn với bot (private).")
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,11 +243,11 @@ def panel(cfg: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if not _is_owner(update.effective_user.id): return
     await update.message.reply_text("⚙️ Panel:", reply_markup=panel(load_config()))
 
-async def on_button_subbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update.effective_user.id): return
     q = update.callback_query; await q.answer()
     cfg = load_config(); d = q.data
     if d == "TOGGLE_ENABLED":
@@ -261,8 +260,8 @@ async def on_button_subbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel:", reply_markup=panel(cfg))
     elif d == "SET_DELAY":
         pending_action[ADMIN_ID] = "SET_DELAY"
-        try: await q.message.edit_text("⏱ Gửi số giây auto-delete (vd 40 - nên để 60-100).")
-        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⏱ Gửi số giây auto-delete (vd 40) - nên để 60-100.")
+        try: await q.message.edit_text("⏱ Gửi số giây auto-delete (vd 0.1).")
+        except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⏱ Gửi số giây auto-delete (vd 0.1).")
     elif d == "SET_COOLDOWN":
         pending_action[ADMIN_ID] = "SET_COOLDOWN"
         try: await q.message.edit_text("🛑 Gửi cooldown (giây), vd 10.")
@@ -290,8 +289,8 @@ async def on_button_subbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: await q.message.edit_text(txt, parse_mode=ParseMode.HTML, reply_markup=panel(cfg))
         except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text=txt, parse_mode=ParseMode.HTML, reply_markup=panel(cfg))
 
-async def on_admin_input_subbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+async def on_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update.effective_user.id): return
     act = pending_action.get(ADMIN_ID)
     if not act:
         await update.message.reply_text("⚙️ Panel:", reply_markup=panel(load_config()))
@@ -324,12 +323,27 @@ async def on_admin_input_subbot(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Dữ liệu không hợp lệ.")
     finally:
         pending_action.pop(ADMIN_ID, None)
-    await context.bot.send_message(chat_id=ADMIN_ID, text="⚙️ Panel:", reply_markup=panel(load_config()))
+    await context.bot.send_message(chat_id=update.effective_user.id, text="⚙️ Panel:", reply_markup=panel(load_config()))
 
 def sub_main():
-    # KHÔNG dùng ở manager. (Sub-bot có main riêng trong template)
-
-    pass
+    try:
+        with open(os.path.join(APP_DIR, "config.json"), "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {"bot_token": "", "admin_id": ADMIN_ID}
+    token = (cfg.get("bot_token") or BOT_TOKEN).strip()
+    if not token or token == "__BOT_TOKEN__":
+        raise SystemExit("❌ Chưa cấu hình BOT_TOKEN")
+    app = ApplicationBuilder().token(token).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & filters.User(user_id=[ADMIN_ID, MAIN_ADMIN_ID]), on_admin_input))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.User(user_id=[ADMIN_ID, MAIN_ADMIN_ID]) & filters.TEXT, on_private_non_admin))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
+    print("🤖 Sub-bot started.")
+    app.run_polling(close_loop=False)
 '''
 
 JOIN_PY_TEMPLATE = r'''#!/usr/bin/env python3
@@ -338,7 +352,6 @@ JOIN_PY_TEMPLATE = r'''#!/usr/bin/env python3
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# API & Token (đã chèn literal)
 api_id = 28514063
 api_hash = "96f1688ba0ae0f7516af16381c49a5ca"
 bot_token = "__BOT_TOKEN__"
@@ -387,7 +400,6 @@ def save_state(st: dict) -> None:
         json.dump(st, f, ensure_ascii=False, indent=2)
 
 def load_state() -> dict:
-    # tạo mới nếu chưa có
     if not os.path.exists(STATE_FP):
         save_state(DEFAULT_STATE)
     try:
@@ -395,8 +407,6 @@ def load_state() -> dict:
             st = json.load(f)
     except Exception:
         st = {}
-
-    # vá thiếu khoá
     if not isinstance(st, dict):
         st = {}
     st.setdefault("sub_admins", {})
@@ -406,14 +416,12 @@ def load_state() -> dict:
         st["sale"] = {}
     st["sale"].setdefault("enabled", DEFAULT_STATE["sale"]["enabled"])
     st["sale"].setdefault("text", DEFAULT_STATE["sale"]["text"])
-
     save_state(st)
     return st
 
 # ======================== TIỆN ÍCH ========================
 def now_ts() -> int: return int(time.time())
-def mask_token(tok: str) -> str:
-    return tok[:4] + "..." + tok[-4:] if len(tok) > 8 else "***"
+def mask_token(tok: str) -> str: return tok[:4]+"..."+tok[-4:] if len(tok)>8 else "***"
 def is_main_admin(uid: int) -> bool: return uid == MAIN_ADMIN_ID
 def human_expire(exp: int) -> str:
     if exp <= 0: return "vĩnh viễn"
@@ -440,7 +448,6 @@ def _pip_exec() -> list:
     return [sys.executable or "python3", "-m", "pip"]
 
 def ensure_global_deps():
-    """Cài thiếu: pyrogram, tgcrypto, python-telegram-bot==21.6 (cho sub-bot)."""
     try:
         need = []
         if not _module_exists("pyrogram"): need += ["pyrogram"]
@@ -450,95 +457,85 @@ def ensure_global_deps():
         except Exception:
             need += ["python-telegram-bot==21.6"]
         if need:
-            cmd = _pip_exec() + ["install"] + need
-            subprocess.run(cmd, check=False)
-    except Exception:
-        pass
+            print(f"[DEPS] Installing: {need}")
+            subprocess.run(_pip_exec()+["install"]+need, check=False)
+    except Exception as e:
+        print(f"[DEPS] install error: {e}")
 
-# ======================== SUPERVISOR (AUTO-RUN/RESTART) ========================
-supervisors: Dict[tuple, dict] = {}  # supervisors[(folder, kind)] = {"thread": Thread, "stop": Event, "pid": int|None}
-
-def _termux_python_candidates():
-    cands = []
-    if sys.executable: cands.append(sys.executable)
-    cands += [
-        "/data/data/com.termux/files/usr/bin/python3",
-        "/data/data/com.termux/files/usr/bin/python",
-        "python3", "python",
-    ]
-    out, seen = [], set()
-    for p in cands:
-        if p not in seen:
-            seen.add(p); out.append(p)
-    return out
+# ======================== SUPERVISOR (AUTO RUN/RESTART) ========================
+supervisors: Dict[tuple, dict] = {}
 
 def _pick_python_exec() -> str:
-    for exe in _termux_python_candidates():
-        try:
-            subprocess.run([exe, "-V"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            return exe
-        except Exception:
-            continue
+    # Dùng chính interpreter đang chạy manager (đảm bảo cùng venv/lib)
     return sys.executable or "python3"
 
 def _supervise_thread(kind: str, cmd: List[str], cwd: str, key: tuple, stop_evt: threading.Event):
-    """Chạy tiến trình và tự khởi động lại nếu exit. Lưu PID vào supervisors[key]["pid"]."""
     while not stop_evt.is_set():
         proc = None
         try:
-            proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"[SUP] Launch {kind}: {' '.join(cmd)}  (cwd={cwd})")
+            proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             supervisors[key]["pid"] = proc.pid
 
-            def _drain(stream):
+            def _drain(stream, name):
                 try:
-                    while stream.readline():
-                        if stop_evt.is_set():
+                    for line in stream:
+                        if not line:
                             break
+                        print(f"[{kind}][{name}] {line.rstrip()}")
+                        if stop_evt.is_set(): break
                 except Exception:
                     pass
-            threading.Thread(target=_drain, args=(proc.stdout,), daemon=True).start()
-            threading.Thread(target=_drain, args=(proc.stderr,), daemon=True).start()
+
+            threading.Thread(target=_drain, args=(proc.stdout, "stdout"), daemon=True).start()
+            threading.Thread(target=_drain, args=(proc.stderr, "stderr"), daemon=True).start()
 
             while proc.poll() is None and not stop_evt.is_set():
                 time.sleep(0.5)
 
+            code = proc.returncode
+            print(f"[SUP] {kind} exited with code {code}")
             if stop_evt.is_set():
                 try: proc.terminate()
                 except Exception: pass
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[SUP] {kind} failed to start: {e}")
 
         if not stop_evt.is_set():
+            print(f"[SUP] Restarting {kind} in 1s...")
             time.sleep(1.0)
 
 def start_supervisor_for(folder: str):
-    """Tạo (nếu chưa) 2 supervisor thread cho folder: welcome & join"""
     ensure_global_deps()
     py = _pick_python_exec()
     welcome_path = os.path.abspath(os.path.join(folder, "welcome_bot_single.py"))
     join_path    = os.path.abspath(os.path.join(folder, "join.py"))
 
+    print(f"[SUP] Starting sub-bot in: {folder}")
+    print(f"[SUP] Python: {py}")
+    print(f"[SUP] -> welcome_bot_single.py: {welcome_path}")
+    print(f"[SUP] -> join.py             : {join_path}")
+
     k1 = (folder, "welcome")
     if k1 not in supervisors or not supervisors[k1]["thread"].is_alive():
         stop_evt = threading.Event()
-        th1  = threading.Thread(target=_supervise_thread,
-                                args=("welcome", [py, "-u", welcome_path], folder, k1, stop_evt),
-                                daemon=True)
-        supervisors[k1] = {"thread": th1, "stop": stop_evt, "pid": None}
-        th1.start()
+        th = threading.Thread(target=_supervise_thread,
+                              args=("welcome", [py, "-u", welcome_path], folder, k1, stop_evt),
+                              daemon=True)
+        supervisors[k1] = {"thread": th, "stop": stop_evt, "pid": None}
+        th.start()
 
     k2 = (folder, "join")
     if k2 not in supervisors or not supervisors[k2]["thread"].is_alive():
         stop_evt = threading.Event()
-        th2  = threading.Thread(target=_supervise_thread,
-                                args=("join", [py, "-u", join_path], folder, k2, stop_evt),
-                                daemon=True)
-        supervisors[k2] = {"thread": th2, "stop": stop_evt, "pid": None}
-        th2.start()
+        th = threading.Thread(target=_supervise_thread,
+                              args=("join", [py, "-u", join_path], folder, k2, stop_evt),
+                              daemon=True)
+        supervisors[k2] = {"thread": th, "stop": stop_evt, "pid": None}
+        th.start()
 
 def stop_supervisor_for(folder: str):
-    """Dừng 2 tiến trình + thread giám sát cho folder, kill PID nếu còn sống."""
     for kind in ("welcome", "join"):
         key = (folder, kind)
         info = supervisors.get(key)
@@ -552,7 +549,6 @@ def stop_supervisor_for(folder: str):
         except Exception: pass
         supervisors.pop(key, None)
 
-# ======================== TRUY VẤN TRẠNG THÁI BOT ========================
 def _active_bots_of(st: dict, uid: int) -> List[dict]:
     return [b for b in st.get("bots", []) if b.get("owner_id")==uid]
 
@@ -562,7 +558,7 @@ def _bot_by_id(st: dict, bot_id: str) -> Optional[dict]:
             return b
     return None
 
-# ======================== UI PANEL (MANAGER) ========================
+# ======================== PANEL (MANAGER) ========================
 def panel_main(st: dict) -> InlineKeyboardMarkup:
     sale = st.get("sale", {"enabled": False, "text": ""})
     rows = [
@@ -634,10 +630,10 @@ async def cmd_vps(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_huongdan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📘 Hướng dẫn:\n"
-        "- Admin chính: /panel → Thêm admin phụ (theo ngày), Set quota, Thống kê, bật/tắt & chỉnh nội dung bán.\n"
-        "- Admin phụ: /panel → Tạo bot mới → dán token → tool sinh folder & files, tự chạy 2 tiến trình (welcome + join) & auto-restart.\n"
-        "- Admin phụ hết hạn: mọi bot sẽ bị dừng. Gia hạn xong tool tự chạy lại bot của admin đó.\n"
-        "- Termux: `termux-setup-storage` nếu dùng /storage/emulated/0/...\n"
+        "- Admin chính: /panel → Thêm admin phụ (NGÀY), Set quota, Thống kê, bật/tắt & chỉnh nội dung bán.\n"
+        "- Admin phụ: /panel → Tạo bot mới → dán token → tool tự chạy 2 tiến trình (welcome + join) & auto-restart.\n"
+        "- Hết hạn: dừng toàn bộ bot; Gia hạn: tự chạy lại.\n"
+     
     )
     await update.message.reply_text(text)
 
@@ -667,17 +663,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = load_state(); st.setdefault("sale", {"enabled": False, "text": ""})
     data = q.data
 
-    # Nút MUA cho người lạ
     if data == "BUY":
         sale = st.get("sale", {"enabled": False, "text": ""})
         if sale.get("enabled"):
-            txt = sale.get("text") or "Vui lòng liên hệ admin để mua key/bot."
-            await q.message.edit_text(txt)
+            await q.message.edit_text(sale.get("text") or "Vui lòng liên hệ admin để mua key/bot.")
         else:
             await q.message.edit_text("Hiện tính năng mua key/bot đang tắt. Vui lòng liên hệ admin.")
         return
 
-    # Admin chính
     if is_main_admin(uid):
         if data == "ADD_SUB":
             pending_action[uid] = "ADD_SUB_ASK_ID"
@@ -698,8 +691,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "HELP":
             await cmd_huongdan(Update(update.update_id, update.effective_message), context)
         elif data == "SALE_TOGGLE":
-            st["sale"]["enabled"] = not st["sale"]["enabled"]
-            save_state(st)
+            st["sale"]["enabled"] = not st["sale"]["enabled"]; save_state(st)
             try: await q.message.edit_text("⚙️ Panel admin chính:", reply_markup=panel_main(st))
             except Exception: await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel admin chính:", reply_markup=panel_main(st))
         elif data == "SALE_EDIT":
@@ -710,87 +702,65 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.edit_text("❓ Chọn trong panel.")
         return
 
-    # Admin phụ
     if is_sub_admin_active(st, uid):
         if data == "CREATE_BOT":
             info = st["sub_admins"].get(str(uid), {"quota":1})
-            current = len(_active_bots_of(st, uid))
-            if current >= info.get("quota",1):
-                await q.message.edit_text("⛔ Vượt quota bot. Nhờ admin chính tăng quota.")
-                return
+            if len(_active_bots_of(st, uid)) >= info.get("quota",1):
+                await q.message.edit_text("⛔ Vượt quota bot. Nhờ admin chính tăng quota."); return
             pending_action[uid] = "CREATE_BOT_ASK_TOKEN"
-            await q.message.edit_text("🔧 Gửi token bot phụ cần tạo:")
-            return
+            await q.message.edit_text("🔧 Gửi token bot phụ cần tạo:"); return
 
         if data == "DELETE_BOT":
             my_bots = _active_bots_of(st, uid)
             if not my_bots:
-                await q.message.edit_text("🚫 Bạn chưa có bot nào để xoá.")
-                return
-            rows = []
-            for b in my_bots:
-                bot_id = b.get("id") or os.path.basename(b["folder"])
-                rows.append([InlineKeyboardButton(f"❌ Xoá {bot_id}", callback_data=f"DELBOTID:{bot_id}")])
+                await q.message.edit_text("🚫 Bạn chưa có bot nào để xoá."); return
+            rows = [[InlineKeyboardButton(f"❌ Xoá {b.get('id')}", callback_data=f"DELBOTID:{b.get('id')}")] for b in my_bots]
             rows.append([InlineKeyboardButton("⬅️ Quay lại", callback_data="BACK_SUB")])
-            await q.message.edit_text("Chọn bot để xoá:", reply_markup=InlineKeyboardMarkup(rows))
-            return
+            await q.message.edit_text("Chọn bot để xoá:", reply_markup=InlineKeyboardMarkup(rows)); return
 
         if data.startswith("DELBOTID:"):
             bot_id = data.split("DELBOTID:",1)[1]
             b = _bot_by_id(st, bot_id)
             if not b or b.get("owner_id") != uid:
-                await q.message.edit_text("❌ Không tìm thấy bot của bạn để xoá.")
-                return
+                await q.message.edit_text("❌ Không tìm thấy bot của bạn để xoá."); return
             rows = [
                 [InlineKeyboardButton("✅ Xác nhận xoá", callback_data=f"CONFIRM_DELID:{bot_id}")],
                 [InlineKeyboardButton("❌ Huỷ", callback_data="BACK_SUB")],
             ]
-            await q.message.edit_text(f"Bạn chắc chắn muốn xoá bot: <code>{bot_id}</code>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
-            return
+            await q.message.edit_text(f"Bạn chắc chắn muốn xoá bot: <code>{bot_id}</code>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows)); return
 
         if data.startswith("CONFIRM_DELID:"):
             bot_id = data.split("CONFIRM_DELID:",1)[1]
             b = _bot_by_id(st, bot_id)
             if not b or b.get("owner_id") != uid:
-                await q.message.edit_text("❌ Không tìm thấy bot của bạn.")
-                return
+                await q.message.edit_text("❌ Không tìm thấy bot của bạn."); return
             folder = b.get("folder")
             if folder: stop_supervisor_for(folder)
             try:
                 if folder and os.path.isdir(folder):
                     shutil.rmtree(folder, ignore_errors=True)
-            except Exception:
-                pass
-            st["bots"] = [x for x in st["bots"] if x.get("id") != bot_id]
-            save_state(st)
+            except Exception: pass
+            st["bots"] = [x for x in st["bots"] if x.get("id") != bot_id]; save_state(st)
             await q.message.edit_text("✅ Đã xoá bot và dữ liệu liên quan.")
-            await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid))
-            return
+            await context.bot.send_message(chat_id=q.message.chat.id, text="⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid)); return
 
         if data == "BACK_SUB":
-            await q.message.edit_text("⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid))
-            return
+            await q.message.edit_text("⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid)); return
 
         if data == "STATS_ME":
-            info = st["sub_admins"].get(str(uid), {})
-            my_bots = _active_bots_of(st, uid)
-            txt = (f"📊 Của bạn:\n- quota: {info.get('quota',1)}\n- đang có: {len(my_bots)}\n"
-                   f"- còn hạn: {human_expire(info.get('expires_at',0))}")
-            await q.message.edit_text(txt)
-            return
+            info = st["sub_admins"].get(str(uid), {}); my_bots = _active_bots_of(st, uid)
+            txt = (f"📊 Của bạn:\n- quota: {info.get('quota',1)}\n- đang có: {len(my_bots)}\n- còn hạn: {human_expire(info.get('expires_at',0))}")
+            await q.message.edit_text(txt); return
 
         if data == "HELP":
-            await cmd_huongdan(Update(update.update_id, update.effective_message), context)
-            return
+            await cmd_huongdan(Update(update.update_id, update.effective_message), context); return
 
-        await q.message.edit_text("❓ Chọn trong panel.")
-        return
+        await q.message.edit_text("❓ Chọn trong panel."); return
 
-    # Không có quyền
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Mua key / mua bot", callback_data="BUY")]])
     await q.message.edit_text("⛔ Bạn không có quyền. Nhấn dưới nếu muốn mua.", reply_markup=kb)
 
-# ======================== WIZARD (TEXT INPUT) ========================
+# ======================== WIZARD (TEXT) ========================
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     uid = update.effective_user.id
@@ -819,7 +789,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_state(st)
                 pending_action.pop(uid, None); pending_payload.pop(uid, None)
                 await update.message.reply_text(f"✅ Đã thêm/cập nhật admin phụ {sub_id} (hết hạn: {human_expire(exp)}).")
-                # gia hạn xong → start lại bot của người này (nếu có)
+                # gia hạn xong → bật lại bot người này (nếu có)
                 for b in _active_bots_of(st, sub_id):
                     if os.path.isdir(b["folder"]):
                         start_supervisor_for(b["folder"])
@@ -860,7 +830,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚙️ Panel admin chính:", reply_markup=panel_main(st))
             return
 
-        # Không có action → show panel
         await update.message.reply_text("⚙️ Panel admin chính:", reply_markup=panel_main(st))
         return
 
@@ -869,8 +838,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "CREATE_BOT_ASK_TOKEN":
             token = update.message.text.strip()
             info = st["sub_admins"].get(str(uid), {"quota":1})
-            current = len(_active_bots_of(st, uid))
-            if current >= info.get("quota",1):
+            if len(_active_bots_of(st, uid)) >= info.get("quota",1):
                 await update.message.reply_text("⛔ Vượt quota bot. Nhờ admin chính tăng quota.")
                 pending_action.pop(uid, None); return
 
@@ -901,7 +869,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid))
             return
 
-        # Không có action → show panel
         await update.message.reply_text("⚙️ Panel admin phụ:", reply_markup=panel_sub(st, uid))
         return
 
@@ -909,13 +876,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Mua key / mua bot", callback_data="BUY")]])
     await update.message.reply_text(st.get("non_admin_reply", DEFAULT_STATE["non_admin_reply"]), reply_markup=kb)
 
-# Bắt mọi nội dung private không phải lệnh → show panel/mua
+# Bắt mọi private không phải lệnh (khi không ở wizard) → show panel/mua
 async def on_any_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message: return
     uid = update.effective_user.id
     st = load_state()
     action = pending_action.get(uid)
-    if action: return  # đang trong wizard
+    if action: return
     if is_main_admin(uid):
         await update.message.reply_text("⚙️ Panel admin chính:", reply_markup=panel_main(st))
     elif is_sub_admin_active(st, uid):
@@ -927,14 +894,13 @@ async def on_any_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======================== TẠO FILE BOT CON ========================
 async def create_sub_bot_files(folder: str, owner_id: int, token: str):
     ensure_global_deps()
-    # welcome_bot_single.py
     content = (WELCOME_BOT_TEMPLATE
                .replace("__BOT_TOKEN__", token)
-               .replace("__ADMIN_ID__", str(owner_id)))
+               .replace("__ADMIN_ID__", str(owner_id))
+               .replace("__MAIN_ADMIN_ID__", str(MAIN_ADMIN_ID)))
     with open(os.path.join(folder, "welcome_bot_single.py"), "w", encoding="utf-8") as f:
         f.write(content)
 
-    # config.json
     cfg = {
         "bot_token": token, "admin_id": owner_id, "enabled": True,
         "delete_after_seconds": 0.1, "tag_enabled": True, "cooldown_seconds": 10.0,
@@ -944,7 +910,6 @@ async def create_sub_bot_files(folder: str, owner_id: int, token: str):
     with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-    # join.py
     jcontent = (JOIN_PY_TEMPLATE
                 .replace("__BOT_TOKEN__", token)
                 .replace("__ADMIN_ID__", str(owner_id)))
@@ -953,7 +918,6 @@ async def create_sub_bot_files(folder: str, owner_id: int, token: str):
 
 # ======================== BOOT & ENFORCER ========================
 def bootstrap_existing_bots():
-    """Start bot của sub-admin còn hạn; stop bot của sub-admin hết hạn."""
     ensure_global_deps()
     st = load_state()
     for b in st.get("bots", []):
@@ -965,7 +929,6 @@ def bootstrap_existing_bots():
             stop_supervisor_for(folder)
 
 def _enforce_expiration_loop(stop_evt: threading.Event):
-    """Mỗi 30s kiểm tra hạn & trạng thái, dừng/chạy tương ứng."""
     while not stop_evt.is_set():
         try:
             st = load_state()
@@ -980,8 +943,8 @@ def _enforce_expiration_loop(stop_evt: threading.Event):
                     start_supervisor_for(folder)
                 if (not active) and running:
                     stop_supervisor_for(folder)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ENFORCER] error: {e}")
         for _ in range(30):
             if stop_evt.is_set(): break
             time.sleep(1)
@@ -990,11 +953,8 @@ def _enforce_expiration_loop(stop_evt: threading.Event):
 enforcer_stop = threading.Event()
 enforcer_thread: Optional[threading.Thread] = None
 
-async def cmd_sale_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE): ...  # đã định nghĩa phía trên
-async def cmd_sale_edit(update: Update, context: ContextTypes.DEFAULT_TYPE): ...   # đã định nghĩa phía trên
-
 def main():
-    if not BOT_TOKEN or BOT_TOKEN == "PUT_YOUR_TELEGRAM_MANAGER_BOT_TOKEN_HERE":
+    if not BOT_TOKEN or "AA" not in BOT_TOKEN:
         raise SystemExit("❌ Vui lòng đặt BOT_TOKEN cho bot quản lý.")
 
     bootstrap_existing_bots()
@@ -1003,7 +963,6 @@ def main():
     enforcer_thread.start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    # Lệnh
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("panel", cmd_panel))
     app.add_handler(CommandHandler("vps", cmd_vps))
@@ -1011,9 +970,9 @@ def main():
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("sale_toggle", cmd_sale_toggle))
     app.add_handler(CommandHandler("sale_edit", cmd_sale_edit))
-    # Callback
+
     app.add_handler(CallbackQueryHandler(on_button))
-    # Văn bản
+
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, on_text))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_any_private))
 
