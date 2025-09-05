@@ -29,7 +29,7 @@ from telegram.ext import (
 )
 
 # ======== CẤU HÌNH CƠ BẢN ========
-BOT_TOKEN = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"   # hoặc đặt trong config.json
+BOT_TOKEN = "8442522633:AAE9joOXoptFCyep67H9OWvXIODvF5I3b9Q"   # hoặc đặt trong config.json
 ADMIN_ID = 7550813603
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
