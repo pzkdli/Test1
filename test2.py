@@ -25,7 +25,7 @@ from telegram.ext import (
 )
 
 # ======================== CẤU HÌNH ========================
-BOT_TOKEN = "8442522633:AAHuI8o-OQXQHlvH2sGRQzRzPItESX9KoNc"  # BOT QUẢN LÝ
+BOT_TOKEN = "8442522633:AAE9joOXoptFCyep67H9OWvXIODvF5I3b9Q"  # BOT QUẢN LÝ
 MAIN_ADMIN_ID = 7550813603
 
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
